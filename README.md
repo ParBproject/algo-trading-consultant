@@ -1,5 +1,12 @@
 # Algorithmic Trading Research Framework
 
+## For a data analyst application
+
+**Keep this off the first page of a data analyst resume.** It is systematic-strategy research: indicators, a backtest, an optimization surface. A data analyst interview will ask about the metric definition and the baseline, not the bot.
+
+<p align="center"><img src="screenshots/01_indicators_dashboard.png" alt="Indicator dashboard" width="100%"></p>
+<p align="center"><img src="screenshots/06_performance_summary.png" alt="Strategy performance summary" width="100%"></p>
+
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](requirements.txt)
 [![Research](https://img.shields.io/badge/Mode-Backtest_%26_Paper_Trading-2ea44f)](src/backtester.py)
 [![Configuration](https://img.shields.io/badge/Configuration-YAML-cb171e)](config/example.yaml)
