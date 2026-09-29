@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from loguru import logger
 
 from data.fetcher import fetch_yfinance
-from src.backtester import VectorizedBacktester
+from src.backtester import VectorizedBacktester, execution_lag_rows
 from src.executor import get_executor, PaperExecutor
 from src.risk_manager import (
     fixed_pct_size, compute_stops, PortfolioRiskState, is_stop_hit
@@ -76,6 +76,12 @@ def run_backtest(args: argparse.Namespace) -> None:
     df = fetch_yfinance(args.ticker, args.start, args.end, args.interval)
     strategy = get_strategy(args.strategy)
 
+    if args.strategy == "pairs_trading":
+        raise SystemExit(
+            "Pairs signals need both legs: generate_signals(df_a, df_b). "
+            "The single-asset backtest does not price a two-leg book."
+        )
+
     signals_df = strategy.generate_signals(df)
 
     bt = VectorizedBacktester(
@@ -86,8 +92,11 @@ def run_backtest(args: argparse.Namespace) -> None:
     metrics = bt.run(signals_df)
     print(metrics.summary())
 
-    # Buy-and-hold benchmark
-    bah_equity = (args.capital * (1 + df["Returns"].fillna(0)).cumprod())
+    # Buy-and-hold over the same bars the strategy equity covers.
+    aligned_returns = (
+        df["Close"].pct_change().reindex(metrics.equity_curve.index).fillna(0)
+    )
+    bah_equity = args.capital * (1 + aligned_returns).cumprod()
 
     # Charts
     Path("reports").mkdir(exist_ok=True)
@@ -115,9 +124,12 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 def run_live(args: argparse.Namespace) -> None:
     """
-    Simulated live loop: fetch latest bar, generate signal, execute via broker.
+    Bar loop for the in-memory paper broker.
 
-    In real deployment, replace the yfinance call with a streaming feed.
+    The signal on a bar uses that bar's close, so the order is sent on the
+    next bar. ``--broker paper`` is the only path that runs unless
+    ``--allow-live`` is set. In a real deployment, replace the history
+    download with a streaming feed that still waits for the bar to close.
     """
     logger.info(f"=== LIVE MODE | {args.strategy} on {args.ticker} via {args.broker} ===")
 
@@ -135,9 +147,11 @@ def run_live(args: argparse.Namespace) -> None:
     for i in range(60, len(df)):  # start after warm-up period
         bar = df.iloc[:i + 1]
         signals_df = strategy.generate_signals(bar)
-        latest = signals_df.iloc[-1]
-        price = float(latest["Close"])
-        position = int(latest["Position"])
+        if len(signals_df) < 2:
+            continue
+        decision, fill = execution_lag_rows(signals_df)
+        price = float(fill["Close"])
+        position = int(decision["Position"])
 
         # Update paper executor price feed
         if isinstance(executor, PaperExecutor):
@@ -169,7 +183,7 @@ def run_live(args: argparse.Namespace) -> None:
             if qty > 0:
                 executor.submit_order(args.ticker, "buy", qty)
                 stops = compute_stops(price, direction=1,
-                                      atr=float(latest.get("ATR", price * 0.02)))
+                                      atr=float(decision.get("ATR", price * 0.02)))
                 open_stops[args.ticker] = (stops.stop_loss, stops.take_profit, 1)
 
         elif position == -1 and current_qty_val >= 0:
@@ -177,7 +191,7 @@ def run_live(args: argparse.Namespace) -> None:
             if qty > 0:
                 executor.submit_order(args.ticker, "sell", qty)
                 stops = compute_stops(price, direction=-1,
-                                      atr=float(latest.get("ATR", price * 0.02)))
+                                      atr=float(decision.get("ATR", price * 0.02)))
                 open_stops[args.ticker] = (stops.stop_loss, stops.take_profit, -1)
 
         elif position == 0 and current_qty_val != 0:
