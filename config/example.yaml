@@ -50,6 +50,7 @@ optimization:
   method: "grid"                # grid | random | bayesian
   n_trials: 200
   cv_folds: 5
+  holdout_fraction: 0.2         # tail excluded from parameter selection
   metric: "sharpe"              # sharpe | sortino | calmar | total_return
   param_space:
     lookback: [10, 15, 20, 30, 50]
@@ -58,16 +59,16 @@ optimization:
     rsi_period: [10, 14, 21]
 
 execution:
-  broker: "alpaca"              # alpaca | ccxt_binance | ccxt_kraken | paper
+  # paper is the in-memory broker. alpaca and ccxt are opt-in and still
+  # default to paper/sandbox endpoints. A live endpoint also needs
+  # --allow-live on the command line. Put keys in the environment
+  # (see .env.example); this file does not contain them.
+  broker: "paper"               # paper | alpaca | ccxt
   paper_trading: true
   alpaca:
     base_url: "https://paper-api.alpaca.markets"
-    api_key: "${ALPACA_API_KEY}"
-    secret_key: "${ALPACA_SECRET_KEY}"
   ccxt:
     exchange: "binance"
-    api_key: "${CCXT_API_KEY}"
-    secret: "${CCXT_SECRET}"
 
 logging:
   level: "INFO"

@@ -58,10 +58,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slippage", type=float, default=0.0005,
                         help="Slippage fraction")
     parser.add_argument("--live", action="store_true",
-                        help="Run in live/paper loop instead of backtest")
+                        help="Run the bar loop instead of a vectorized backtest")
     parser.add_argument("--broker", default="paper",
                         choices=["paper", "alpaca", "ccxt"],
-                        help="Broker for live execution")
+                        help="Execution route. Default is the in-memory paper broker")
+    parser.add_argument("--allow-live", action="store_true",
+                        help="Permit a live broker endpoint. Off by default")
+    parser.add_argument("--position-pct", type=float, default=0.02,
+                        help="Fraction of equity allocated to one position")
     parser.add_argument("--report", action="store_true",
                         help="Generate PDF report after backtest")
     parser.add_argument("--log-level", default="INFO")
@@ -124,16 +128,16 @@ def run_backtest(args: argparse.Namespace) -> None:
 
 def run_live(args: argparse.Namespace) -> None:
     """
-    Bar loop for the in-memory paper broker.
+    Bar loop. A signal that uses the close is filled on the next bar.
 
-    The signal on a bar uses that bar's close, so the order is sent on the
-    next bar. ``--broker paper`` is the only path that runs unless
-    ``--allow-live`` is set. In a real deployment, replace the history
-    download with a streaming feed that still waits for the bar to close.
+    ``--broker paper`` is the default and does not leave the process.
+    Alpaca and CCXT stay on paper or sandbox endpoints unless
+    ``--allow-live`` is set. Replace the history download with a stream
+    that still waits for the bar to close before reading its signal.
     """
     logger.info(f"=== LIVE MODE | {args.strategy} on {args.ticker} via {args.broker} ===")
 
-    executor = get_executor(args.broker, initial_capital=args.capital)
+    executor = build_executor(args)
     strategy = get_strategy(args.strategy)
     risk_state = PortfolioRiskState(
         peak_equity=args.capital,
@@ -179,7 +183,7 @@ def run_live(args: argparse.Namespace) -> None:
 
         # Enter / exit
         if position == 1 and current_qty_val <= 0:
-            qty = fixed_pct_size(equity, price, risk_pct=0.05)
+            qty = fixed_pct_size(equity, price, risk_pct=args.position_pct)
             if qty > 0:
                 executor.submit_order(args.ticker, "buy", qty)
                 stops = compute_stops(price, direction=1,
@@ -187,7 +191,7 @@ def run_live(args: argparse.Namespace) -> None:
                 open_stops[args.ticker] = (stops.stop_loss, stops.take_profit, 1)
 
         elif position == -1 and current_qty_val >= 0:
-            qty = fixed_pct_size(equity, price, risk_pct=0.05)
+            qty = fixed_pct_size(equity, price, risk_pct=args.position_pct)
             if qty > 0:
                 executor.submit_order(args.ticker, "sell", qty)
                 stops = compute_stops(price, direction=-1,
@@ -206,6 +210,34 @@ def run_live(args: argparse.Namespace) -> None:
         logger.info(f"Trade log saved: logs/{args.ticker}_{args.strategy}_trades.csv")
 
 
+def build_executor(args: argparse.Namespace):
+    """Construct the executor. Live endpoints require ``--allow-live``.
+
+    The in-memory paper broker is the default and needs no API keys.
+    Alpaca and CCXT read keys from the environment, never from ``args``.
+    """
+    if args.broker == "paper":
+        return get_executor(
+            "paper",
+            initial_capital=args.capital,
+            commission=args.commission,
+            slippage=args.slippage,
+        )
+    if args.broker == "alpaca":
+        return get_executor(
+            "alpaca",
+            paper=not args.allow_live,
+            allow_live=args.allow_live,
+        )
+    if args.broker == "ccxt":
+        return get_executor(
+            "ccxt",
+            sandbox=not args.allow_live,
+            allow_live=args.allow_live,
+        )
+    raise SystemExit(f"Unknown broker '{args.broker}'")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -222,7 +254,15 @@ def main() -> None:
         args.commission = cfg["backtesting"]["commission_pct"]
         args.slippage = cfg["backtesting"]["slippage_pct"]
         args.broker = cfg["execution"]["broker"]
+        args.position_pct = cfg["risk"].get("max_position_pct", args.position_pct)
         args.log_level = cfg["logging"]["level"]
+        # A config file cannot turn on a live order route by itself.
+        if cfg["execution"].get("paper_trading", True) is False and not args.allow_live:
+            logger.warning(
+                "Config set execution.paper_trading to false. "
+                "Live endpoints stay disabled without --allow-live; using the paper broker."
+            )
+            args.broker = "paper"
 
     setup_logging(args.log_level)
 

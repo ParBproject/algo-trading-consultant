@@ -151,38 +151,35 @@ def fetch_alpaca(
     start: str = "2020-01-01",
     end: str | None = None,
     timeframe: str = "1Day",
-    api_key: str | None = None,
-    secret_key: str | None = None,
-    base_url: str = "https://paper-api.alpaca.markets",
 ) -> pd.DataFrame:
     """
     Fetch historical bars from Alpaca Markets API.
 
-    Requires `alpaca-py` and valid API credentials set via
-    environment variables ALPACA_API_KEY / ALPACA_SECRET_KEY,
-    or passed directly.
+    Requires `alpaca-py`. Credentials come from the environment variables
+    ALPACA_API_KEY and ALPACA_SECRET_KEY, not from function arguments.
 
     Args:
         ticker:    Equity symbol (e.g. 'AAPL').
         start:     ISO date string.
         end:       ISO date string (defaults to today).
         timeframe: Alpaca TimeFrame string: '1Min','5Min','1Hour','1Day'.
-        api_key:   Override env var ALPACA_API_KEY.
-        secret_key: Override env var ALPACA_SECRET_KEY.
-        base_url:  API base URL (paper or live).
 
     Returns:
         Preprocessed OHLCV DataFrame.
     """
+    api_key = os.environ.get("ALPACA_API_KEY", "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    if not api_key or not secret_key:
+        raise RuntimeError(
+            "Set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment."
+        )
+
     try:
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
     except ImportError:
         raise ImportError("Install alpaca-py: pip install alpaca-py")
-
-    api_key = api_key or os.environ["ALPACA_API_KEY"]
-    secret_key = secret_key or os.environ["ALPACA_SECRET_KEY"]
 
     client = StockHistoricalDataClient(api_key, secret_key)
 
@@ -217,8 +214,6 @@ def fetch_ccxt(
     start: str = "2020-01-01",
     limit_per_call: int = 1000,
     timeframe: str = "1d",
-    api_key: str | None = None,
-    secret: str | None = None,
     use_cache: bool = True,
 ) -> pd.DataFrame:
     """
@@ -232,9 +227,10 @@ def fetch_ccxt(
         start:          ISO date string.
         limit_per_call: Candles per API call (max varies by exchange).
         timeframe:      CCXT timeframe string: '1m','5m','1h','1d'.
-        api_key:        Optional API key (for private endpoints).
-        secret:         Optional API secret.
         use_cache:      Cache to parquet on disk.
+
+    Public candle history does not need API keys. CCXT_API_KEY and
+    CCXT_SECRET are attached only when both are set in the environment.
 
     Returns:
         Preprocessed OHLCV DataFrame.
@@ -253,7 +249,9 @@ def fetch_ccxt(
 
     exchange_class = getattr(ccxt, exchange_id)
     kwargs: dict = {"enableRateLimit": True}
-    if api_key:
+    api_key = os.environ.get("CCXT_API_KEY", "")
+    secret = os.environ.get("CCXT_SECRET", "")
+    if api_key and secret:
         kwargs["apiKey"] = api_key
         kwargs["secret"] = secret
     exchange = exchange_class(kwargs)
