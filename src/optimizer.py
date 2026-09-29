@@ -169,8 +169,9 @@ class StrategyOptimizer:
                 logger.debug(f"Eval failed for {params}: {e}")
                 scores.append(-np.inf)
 
-        finite = [s for s in scores if np.isfinite(s)]
-        return float(np.mean(finite)) if finite else -np.inf
+        if not scores or any(not np.isfinite(score) for score in scores):
+            return -np.inf
+        return float(np.mean(scores))
 
     def _score_holdout(self, params: dict[str, Any]) -> float:
         """Score the already chosen parameters on the untouched tail."""
