@@ -8,7 +8,9 @@ Supported methods:
     - Random Search   : Randomly sampled configurations (faster).
     - Bayesian Search : Hyperopt Tree-Parzen Estimator (most efficient).
 
-All methods use TimeSeriesSplit to prevent lookahead bias.
+Parameter search scores walk-forward test folds on a prefix of the sample.
+The final holdout is scored once, after the choice is made, and is not
+an input to that choice.
 
 Usage::
 
@@ -57,10 +59,13 @@ class StrategyOptimizer:
         metric:         Objective metric to maximise.
         method:         'grid', 'random', or 'bayesian'.
         n_trials:       Number of trials for random/Bayesian search.
-        cv_folds:       TimeSeriesSplit folds for cross-validation.
+        cv_folds:       Walk-forward folds inside the search prefix.
+        holdout_fraction: Tail fraction excluded from selection. The chosen
+                        parameters are scored on it once and stored on
+                        ``oos_score``.
         initial_capital:Backtesting starting capital.
-        commission:     Commission fraction.
-        slippage:       Slippage fraction.
+        commission:     One-way commission fraction.
+        slippage:       One-way slippage fraction.
         n_jobs:         Parallel jobs for grid/random search (-1 = all CPUs).
     """
 
@@ -71,12 +76,14 @@ class StrategyOptimizer:
     method: Literal["grid", "random", "bayesian"] = "bayesian"
     n_trials: int = 100
     cv_folds: int = 5
+    holdout_fraction: float = 0.2
     initial_capital: float = 100_000.0
     commission: float = 0.001
     slippage: float = 0.0005
     n_jobs: int = -1
 
     _results: list[dict] = field(default_factory=list, init=False, repr=False)
+    oos_score: float | None = field(default=None, init=False, repr=False)
 
     def run(self) -> tuple[dict[str, Any], pd.DataFrame]:
         """
@@ -84,24 +91,64 @@ class StrategyOptimizer:
 
         Returns:
             (best_params, results_df)
-            best_params: Parameter dict achieving highest CV metric.
-            results_df:  Full results table sorted by metric descending.
+            best_params: Parameter dict with the highest walk-forward score
+                         on the search prefix. The holdout is not used.
+            results_df:  Search results sorted by that score. ``oos_score``
+                         on the optimizer is the untouched tail.
         """
+        self._search_df, self._holdout_df = self._split_holdout(self.df)
         if self.method == "grid":
-            return self._grid_search()
+            best, results = self._grid_search()
         elif self.method == "random":
-            return self._random_search()
+            best, results = self._random_search()
         elif self.method == "bayesian":
-            return self._bayesian_search()
+            best, results = self._bayesian_search()
         else:
             raise ValueError(f"Unknown method: {self.method}")
 
+        self.oos_score = self._score_holdout(best)
+        results.attrs["oos_score"] = self.oos_score
+        results.attrs["holdout_fraction"] = self.holdout_fraction
+        logger.info(
+            f"Holdout {self.metric}={self.oos_score:.3f} "
+            "(not used to choose parameters)"
+        )
+        return best, results
+
     # ── Evaluation ────────────────────────────────────────────────────────────
+
+    def _split_holdout(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Cut a tail the search is not allowed to see."""
+        if not 0 < self.holdout_fraction < 1:
+            raise ValueError("holdout_fraction must be between 0 and 1")
+        if self.cv_folds < 2:
+            raise ValueError("cv_folds must be at least 2 for a walk-forward split")
+        cut = int(len(df) * (1 - self.holdout_fraction))
+        min_search = self.cv_folds + 2
+        if cut < min_search or cut >= len(df):
+            raise ValueError(
+                f"Need more than {min_search} rows before a "
+                f"{self.holdout_fraction:.0%} holdout; got {len(df)}."
+            )
+        return df.iloc[:cut].copy(), df.iloc[cut:].copy()
+
+    def _metric_value(self, metrics: PerformanceMetrics) -> float:
+        values = {
+            "sharpe": metrics.sharpe_ratio,
+            "sortino": metrics.sortino_ratio,
+            "calmar": metrics.calmar_ratio,
+            "total_return": metrics.total_return,
+        }
+        score = float(values[self.metric])
+        return score if np.isfinite(score) else -np.inf
 
     def _evaluate(self, params: dict[str, Any]) -> float:
         """
-        Cross-validated metric for a given parameter set.
-        Returns mean metric across TimeSeriesSplit folds.
+        Mean walk-forward score on the search prefix only.
+
+        Each fold generates signals on history through the end of the test
+        window and records the metric on that window. The holdout tail is
+        not in ``_search_df``.
         """
         tscv = TimeSeriesSplit(n_splits=self.cv_folds)
         bt = VectorizedBacktester(
@@ -111,29 +158,35 @@ class StrategyOptimizer:
         )
         scores: list[float] = []
 
-        for train_idx, test_idx in tscv.split(self.df):
-            test_df = self.df.iloc[test_idx]
+        for _train_idx, test_idx in tscv.split(self._search_df):
+            history = self._search_df.iloc[: test_idx[-1] + 1]
             try:
                 strategy = self.strategy_cls(**params)
-                signals_df = strategy.generate_signals(test_df)
-                m = bt.run(signals_df)
-                score = getattr(m, f"{self.metric}_ratio", None) or getattr(m, self.metric, 0.0)
-                # Map attribute names
-                if self.metric == "sharpe":
-                    score = m.sharpe_ratio
-                elif self.metric == "sortino":
-                    score = m.sortino_ratio
-                elif self.metric == "calmar":
-                    score = m.calmar_ratio
-                elif self.metric == "total_return":
-                    score = m.total_return
-                if np.isfinite(score):
-                    scores.append(score)
+                signals_df = strategy.generate_signals(history)
+                scored = bt.run(signals_df, metrics_start=self._search_df.index[test_idx[0]])
+                scores.append(self._metric_value(scored))
             except Exception as e:
                 logger.debug(f"Eval failed for {params}: {e}")
                 scores.append(-np.inf)
 
-        return float(np.mean(scores)) if scores else -np.inf
+        finite = [s for s in scores if np.isfinite(s)]
+        return float(np.mean(finite)) if finite else -np.inf
+
+    def _score_holdout(self, params: dict[str, Any]) -> float:
+        """Score the already chosen parameters on the untouched tail."""
+        bt = VectorizedBacktester(
+            initial_capital=self.initial_capital,
+            commission=self.commission,
+            slippage=self.slippage,
+        )
+        try:
+            strategy = self.strategy_cls(**params)
+            signals_df = strategy.generate_signals(self.df)
+            scored = bt.run(signals_df, metrics_start=self._holdout_df.index[0])
+            return self._metric_value(scored)
+        except Exception as e:
+            logger.warning(f"Holdout evaluation failed: {e}")
+            return -np.inf
 
     # ── Grid Search ───────────────────────────────────────────────────────────
 
