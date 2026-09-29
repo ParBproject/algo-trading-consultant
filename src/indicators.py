@@ -316,20 +316,31 @@ def spread_zscore(
     period: int = 60,
 ) -> pd.Series:
     """
-    Compute the hedge-ratio-adjusted spread z-score between two price series.
-    Used in pairs trading.
+    Z-score of a pairs spread whose hedge ratio is fit on past bars only.
+
+    The regression at bar *t* uses ``[t - period, t)``. The current prices
+    are the residual being scored, and they are not inside the fit. The
+    full sample is never used.
     """
     from scipy import stats
+
+    if len(series_a) != len(series_b):
+        raise ValueError("spread_zscore requires aligned series of equal length")
+
     spreads: list[float] = []
+    a_values = series_a.to_numpy(dtype=float)
+    b_values = series_b.to_numpy(dtype=float)
     for i in range(len(series_a)):
         if i < period:
             spreads.append(np.nan)
             continue
-        a_window = series_a.iloc[i - period:i].values
-        b_window = series_b.iloc[i - period:i].values
+        a_window = a_values[i - period:i]
+        b_window = b_values[i - period:i]
+        if np.std(b_window) == 0:
+            spreads.append(np.nan)
+            continue
         slope, intercept, *_ = stats.linregress(b_window, a_window)
-        spread = a_window[-1] - slope * b_window[-1] - intercept
-        spreads.append(spread)
+        spreads.append(float(a_values[i] - slope * b_values[i] - intercept))
 
     spread_series = pd.Series(spreads, index=series_a.index)
     return zscore(spread_series, period).rename("SpreadZScore")
