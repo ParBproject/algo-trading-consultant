@@ -67,6 +67,8 @@ class StrategyOptimizer:
         commission:     One-way commission fraction.
         slippage:       One-way slippage fraction.
         n_jobs:         Parallel jobs for grid/random search (-1 = all CPUs).
+        seed:           Seed for random and Bayesian draws. Grid search does
+                        not use it. The same seed repeats the same samples.
     """
 
     strategy_cls: type[BaseStrategy]
@@ -81,6 +83,7 @@ class StrategyOptimizer:
     commission: float = 0.001
     slippage: float = 0.0005
     n_jobs: int = -1
+    seed: int = 0
 
     _results: list[dict] = field(default_factory=list, init=False, repr=False)
     oos_score: float | None = field(default=None, init=False, repr=False)
@@ -218,10 +221,11 @@ class StrategyOptimizer:
         keys = list(self.param_space.keys())
         values = [self.param_space[k] for k in keys]
         results: list[dict] = []
+        rng = random.Random(self.seed)
         logger.info(f"Random search: {self.n_trials} trials × {self.cv_folds} folds")
 
         for _ in range(self.n_trials):
-            sampled = [random.choice(v) for v in values]
+            sampled = [rng.choice(v) for v in values]
             params = dict(zip(keys, sampled))
             score = self._evaluate(params)
             results.append({**params, self.metric: score})
@@ -232,12 +236,11 @@ class StrategyOptimizer:
 
     def _bayesian_search(self) -> tuple[dict, pd.DataFrame]:
         try:
-            from hyperopt import fmin, tpe, hp, Trials, STATUS_OK, STATUS_FAIL
+            from hyperopt import fmin, tpe, Trials, STATUS_OK, STATUS_FAIL, hp as hp_module
         except ImportError:
             raise ImportError("Install hyperopt: pip install hyperopt")
 
         # Build hyperopt space from lists (uniform choice)
-        from hyperopt import hp as hp_module
         hp_space = {
             k: hp_module.choice(k, v) if isinstance(v, list) else v
             for k, v in self.param_space.items()
@@ -247,22 +250,22 @@ class StrategyOptimizer:
         results: list[dict] = []
 
         def objective(params):
-            # hyperopt resolves hp.choice to indices – unwrap
-            resolved = {}
-            for k, v in params.items():
-                choices = self.param_space.get(k)
-                if isinstance(choices, list):
-                    resolved[k] = choices[v] if isinstance(v, int) else v
-                else:
-                    resolved[k] = v
-
+            # hyperopt evaluates hp.choice to the element, not the index.
+            resolved = resolve_sampled_params(self.param_space, params)
             score = self._evaluate(resolved)
             results.append({**resolved, self.metric: score})
             return {"loss": -score, "status": STATUS_OK if np.isfinite(score) else STATUS_FAIL}
 
         logger.info(f"Bayesian search: {self.n_trials} trials × {self.cv_folds} folds")
-        fmin(objective, space=hp_space, algo=tpe.suggest,
-             max_evals=self.n_trials, trials=trials, verbose=False)
+        fmin(
+            objective,
+            space=hp_space,
+            algo=tpe.suggest,
+            max_evals=self.n_trials,
+            trials=trials,
+            rstate=np.random.default_rng(self.seed),
+            verbose=False,
+        )
 
         return self._finalise(results)
 
@@ -271,7 +274,41 @@ class StrategyOptimizer:
     def _finalise(self, results: list[dict]) -> tuple[dict, pd.DataFrame]:
         df = pd.DataFrame(results).sort_values(self.metric, ascending=False)
         df.reset_index(drop=True, inplace=True)
-        best = df.iloc[0].to_dict()
-        metric_val = best.pop(self.metric)
+        # Read each column on its own. A mixed row Series upcasts integers
+        # to float, and a float lookback is not a valid rolling window.
+        metric_val = df[self.metric].iloc[0]
+        best = {}
+        for column in df.columns:
+            if column == self.metric:
+                continue
+            value = df[column].iloc[0]
+            best[column] = value.item() if isinstance(value, np.generic) else value
         logger.info(f"Best params: {best}  |  {self.metric}={metric_val:.3f}")
         return best, df
+
+
+def resolve_sampled_params(
+    param_space: dict[str, Any],
+    sampled: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn one hyperopt sample into constructor arguments.
+
+    ``hp.choice`` yields the chosen element. Integer elements are values
+    such as a lookback of 20, not indexes into the choice list. An integer
+    is treated as an index only when it is not itself one of the choices.
+    """
+    resolved: dict[str, Any] = {}
+    for key, value in sampled.items():
+        plain = value.item() if isinstance(value, np.generic) else value
+        choices = param_space.get(key)
+        if (
+            isinstance(choices, list)
+            and isinstance(plain, int)
+            and not isinstance(plain, bool)
+            and plain not in choices
+            and 0 <= plain < len(choices)
+        ):
+            resolved[key] = choices[plain]
+        else:
+            resolved[key] = plain
+    return resolved

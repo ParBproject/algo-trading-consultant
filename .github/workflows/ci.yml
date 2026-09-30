@@ -23,7 +23,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install quality tools
-        run: python -m pip install --upgrade pip ruff
+        run: python -m pip install --upgrade pip "ruff==0.16.9"
 
       - name: Check syntax and critical errors
         run: ruff check src data tests --select E9,F63,F7,F82
@@ -32,7 +32,17 @@ jobs:
         run: python -m compileall -q src data tests
 
       - name: Install test dependencies
-        run: python -m pip install numpy pandas scipy scikit-learn pytest loguru pyyaml
+        run: >-
+          python -m pip install
+          numpy==2.4.4
+          pandas==3.0.6
+          scipy==1.17.1
+          scikit-learn==1.9.1
+          pytest==9.1.1
+          loguru==0.7.3
+          PyYAML==6.0.1
+          hyperopt==0.3.0
+          matplotlib==3.11.2
 
       - name: Run tests
         run: python -m pytest -q

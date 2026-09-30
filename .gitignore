@@ -19,6 +19,11 @@ env/
 .env.*
 !.env.example
 
+# Local market-data cache and generated output
+data/cache/
+logs/
+reports/
+
 # Notebooks and generated local state
 .ipynb_checkpoints/
 .streamlit/secrets.toml

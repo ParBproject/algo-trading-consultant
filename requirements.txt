@@ -1,7 +1,12 @@
+# Pinned versions are the ones the test suite was run against.
+# They install on Python 3.11 (CI) and 3.12.
+# Broker, notebook, and optional research packages below stay ranged:
+# CI does not install them, and pinning an untested release can break a local env.
+
 # Core
-numpy>=1.24.0
-pandas>=2.0.0
-scipy>=1.11.0
+numpy==2.4.4
+pandas==3.0.6
+scipy==1.17.1
 
 # Indicators
 pandas-ta>=0.3.14b
@@ -18,18 +23,18 @@ backtrader>=1.9.78.123
 vectorbt>=0.26.1
 
 # Visualization
-matplotlib>=3.7.0
+matplotlib==3.11.2
 seaborn>=0.12.0
 plotly>=5.15.0
 
 # Optimization
-hyperopt>=0.2.7
-scikit-learn>=1.3.0
+hyperopt==0.3.0
+scikit-learn==1.9.1
 
 # Utils
-loguru>=0.7.0
-PyYAML>=6.0
-joblib>=1.3.0
+loguru==0.7.3
+PyYAML==6.0.1
+joblib==1.6.0
 reportlab>=4.0.0
 
 # Notebook support
@@ -37,4 +42,4 @@ jupyterlab>=4.0.0
 ipywidgets>=8.0.0
 
 # Tests
-pytest>=7.4.0
+pytest==9.1.1

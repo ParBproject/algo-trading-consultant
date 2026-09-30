@@ -6,12 +6,13 @@ data:
   tickers: ["AAPL", "MSFT", "SPY"]
   start_date: "2020-01-01"
   end_date: "2024-01-01"
-  interval: "1d"           # 1m, 5m, 1h, 1d
+  interval: "1d"           # used by --config (1m, 5m, 1h, 1d, 1wk)
   cache_dir: "data/cache"
 
 strategy:
   name: "mean_reversion"   # mean_reversion | momentum | pairs_trading
   params:
+    # Only keys the selected strategy accepts are applied. The rest are ignored.
     # Mean Reversion
     lookback: 20
     entry_z: 2.0

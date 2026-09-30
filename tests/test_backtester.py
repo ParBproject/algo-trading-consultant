@@ -10,6 +10,7 @@ from src.backtester import (
     _compute_metrics,
     _lookup_signal,
     _round_trip_returns,
+    buy_and_hold_equity,
     execution_lag_rows,
 )
 
@@ -34,16 +35,20 @@ def test_signal_does_not_earn_the_bar_that_created_it():
     assert metrics.equity_curve.iloc[-1] == pytest.approx(100_000)
 
 
-def test_signal_earns_the_following_bar():
-    """The long signal on the bar before a 10% jump earns that next return."""
+def test_signal_is_filled_at_the_next_close():
+    """A long signal is filled at the next close and earns only the move after that.
+
+    Prices are 100, 100, 110, 121 and the signal turns on at the second bar.
+    Filling at that same close would earn both 10% steps (21%). Filling at
+    the next close (110) earns only 110 -> 121.
+    """
     df = _frame([100, 100, 110, 121], [0, 1, 1, 1])
     metrics = VectorizedBacktester(
         initial_capital=100_000, commission=0, slippage=0, risk_free_rate=0
     ).run(df)
 
-    # 100 -> 110 -> 121 while long, two 10% steps.
-    assert metrics.total_return == pytest.approx(0.21)
-    assert metrics.equity_curve.iloc[-1] == pytest.approx(121_000)
+    assert metrics.total_return == pytest.approx(0.10)
+    assert metrics.equity_curve.iloc[-1] == pytest.approx(110_000)
 
 
 def test_commission_and_slippage_are_charged_on_turnover():
@@ -121,10 +126,27 @@ def test_signal_lookup_matches_a_timezone_aware_index():
 
 
 def test_metrics_start_drops_earlier_returns():
-    df = _frame([100, 110, 110, 110], [1, 1, 1, 1])
+    df = _frame([100, 100, 110, 121, 121], [0, 1, 1, 1, 1])
     engine = VectorizedBacktester(commission=0, slippage=0, risk_free_rate=0)
     full = engine.run(df)
-    tail = engine.run(df, metrics_start=df.index[2])
-    # The 10% jump is on bar 1 and is inside the full window only.
-    assert full.total_return == pytest.approx(0.1)
+    tail = engine.run(df, metrics_start=df.index[4])
+    # The signal at 100 fills at 110 and earns 110 -> 121. The last bar is flat.
+    assert full.total_return == pytest.approx(0.10)
     assert tail.total_return == pytest.approx(0.0)
+
+
+def test_annual_return_uses_the_number_of_returns():
+    equity = pd.Series([100.0, 110.0, 121.0])
+    position = pd.Series([1, 1, 1])
+    metrics = _compute_metrics(equity, position, bars_per_year=2, risk_free_rate=0.0)
+    # Two returns of 10% over two bars/year is one year: 21%, not the
+    # three-point exponent 1.21 ** (2/3) - 1.
+    assert metrics.total_return == pytest.approx(0.21)
+    assert metrics.annual_return == pytest.approx(0.21)
+
+
+def test_buy_and_hold_starts_at_capital_on_the_first_close():
+    close = pd.Series([50.0, 75.0, 100.0])
+    path = buy_and_hold_equity(close, 100_000)
+    assert path.iloc[0] == pytest.approx(100_000)
+    assert path.iloc[-1] == pytest.approx(200_000)
