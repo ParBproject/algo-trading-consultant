@@ -205,8 +205,8 @@ class PairsTradingStrategy(BaseStrategy):
     Args:
         entry_z:         Z-score threshold to enter.
         exit_z:          Z-score threshold to exit.
-        lookback:        Rolling window for spread regression.
-        min_half_life:   Minimum half-life (bars) for cointegration check.
+        lookback:        Rolling window for the hedge-ratio regression.
+        min_half_life:   Minimum half-life (bars) for the formation check.
         max_half_life:   Maximum half-life (bars) to accept as tradeable.
     """
     name: str = "pairs_trading"
@@ -218,42 +218,54 @@ class PairsTradingStrategy(BaseStrategy):
 
     def generate_signals(
         self,
-        df_a: pd.DataFrame,
-        df_b: pd.DataFrame,
+        df: pd.DataFrame,
+        df_b: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """
         Generate signals for a pair.
 
         Args:
-            df_a: OHLCV DataFrame for asset A.
+            df:   OHLCV DataFrame for asset A.
             df_b: OHLCV DataFrame for asset B (same index required).
 
         Returns:
-            DataFrame with columns: Close_A, Close_B, SpreadZScore,
-            Signal_A (position in A), Signal_B (position in B).
-        """
-        close_a = df_a["Close"].rename("Close_A")
-        close_b = df_b["Close"].rename("Close_B")
-        df = pd.concat([close_a, close_b], axis=1).dropna()
+            DataFrame with Close_A, Close_B, SpreadZScore, HalfLife,
+            Signal_A / Signal_B and Position_A / Position_B.
 
-        # Check cointegration half-life
-        half_life = self._half_life(df["Close_A"] - df["Close_B"])
-        logger.info(f"[{self.name}] Spread half-life: {half_life:.1f} bars")
+        HalfLife is estimated on the opening formation window
+        (``lookback`` bars), not on the prices that are later traded.
+        """
+        if df_b is None:
+            raise TypeError(
+                "PairsTradingStrategy.generate_signals(df_a, df_b) needs both "
+                "legs. The single-asset backtest does not price a two-leg book."
+            )
+
+        close_a = df["Close"].rename("Close_A")
+        close_b = df_b["Close"].rename("Close_B")
+        paired = pd.concat([close_a, close_b], axis=1).dropna()
+
+        formation = paired.iloc[: self.lookback]
+        half_life = self._half_life(formation["Close_A"] - formation["Close_B"])
+        logger.info(f"[{self.name}] Formation half-life: {half_life:.1f} bars")
 
         if not (self.min_half_life <= half_life <= self.max_half_life):
             logger.warning(f"[{self.name}] Half-life {half_life:.1f} outside "
                            f"[{self.min_half_life}, {self.max_half_life}]. "
                            "Pair may not be cointegrated.")
 
-        df["SpreadZScore"] = spread_zscore(df["Close_A"], df["Close_B"], self.lookback)
+        paired["HalfLife"] = half_life
+        paired["SpreadZScore"] = spread_zscore(
+            paired["Close_A"], paired["Close_B"], self.lookback
+        )
 
-        signal_a = pd.Series(0, index=df.index, dtype=int)
-        signal_b = pd.Series(0, index=df.index, dtype=int)
+        signal_a = pd.Series(0, index=paired.index, dtype=int)
+        signal_b = pd.Series(0, index=paired.index, dtype=int)
 
         # Long spread = long A, short B
-        long_spread = df["SpreadZScore"] < -self.entry_z
+        long_spread = paired["SpreadZScore"] < -self.entry_z
         # Short spread = short A, long B
-        short_spread = df["SpreadZScore"] > self.entry_z
+        short_spread = paired["SpreadZScore"] > self.entry_z
 
         signal_a[long_spread] = 1
         signal_b[long_spread] = -1
@@ -261,34 +273,28 @@ class PairsTradingStrategy(BaseStrategy):
         signal_b[short_spread] = 1
 
         # Exit when spread reverts
-        exit_cond = df["SpreadZScore"].abs() < self.exit_z
+        exit_cond = paired["SpreadZScore"].abs() < self.exit_z
 
-        pos_a = _carry_signal_with_exit(signal_a, exit_cond)
-        pos_b = _carry_signal_with_exit(signal_b, exit_cond)
-
-        df["Signal_A"] = signal_a
-        df["Signal_B"] = signal_b
-        df["Position_A"] = pos_a
-        df["Position_B"] = pos_b
-        return df.dropna(subset=["SpreadZScore"])
-
-    # Override required by ABC but pairs uses two DataFrames
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:  # type: ignore
-        raise NotImplementedError(
-            "PairsTradingStrategy.generate_signals() requires two DataFrames. "
-            "Call generate_signals(df_a, df_b) instead."
-        )
+        paired["Signal_A"] = signal_a
+        paired["Signal_B"] = signal_b
+        paired["Position_A"] = _carry_signal_with_exit(signal_a, exit_cond)
+        paired["Position_B"] = _carry_signal_with_exit(signal_b, exit_cond)
+        return paired.dropna(subset=["SpreadZScore"])
 
     @staticmethod
     def _half_life(spread: pd.Series) -> float:
-        """Estimate mean-reversion half-life via OLS."""
+        """Estimate mean-reversion half-life via OLS on the given window."""
         from scipy import stats
-        delta = spread.diff().dropna()
-        lag = spread.shift(1).dropna()
-        slope, *_ = stats.linregress(lag, delta)
+        frame = pd.DataFrame({
+            "lag": spread.shift(1),
+            "delta": spread.diff(),
+        }).dropna()
+        if len(frame) < 3 or frame["lag"].std() == 0:
+            return np.inf
+        slope, *_ = stats.linregress(frame["lag"], frame["delta"])
         if slope >= 0:
             return np.inf  # not mean-reverting
-        return -np.log(2) / slope
+        return float(-np.log(2) / slope)
 
 
 # ─── Signal utilities ─────────────────────────────────────────────────────────

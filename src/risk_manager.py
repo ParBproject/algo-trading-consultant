@@ -29,19 +29,27 @@ def fixed_pct_size(
     capital: float,
     price: float,
     risk_pct: float = 0.02,
+    max_pct: float = 1.0,
 ) -> int:
     """
-    Fixed percentage position sizing.
+    Fixed-fraction notional sizing.
+
+    ``risk_pct`` is the fraction of capital allocated to the position,
+    not the distance to a stop. The result is capped by ``max_pct`` and
+    is never larger than the account can pay for.
 
     Args:
         capital:   Available portfolio value in dollars.
         price:     Current asset price.
         risk_pct:  Fraction of capital to allocate (0.02 = 2%).
+        max_pct:   Hard cap on that fraction (1.0 = no leverage).
 
     Returns:
         Number of shares/units to trade (rounded down).
     """
-    dollar_amount = capital * risk_pct
+    if capital <= 0 or price <= 0 or risk_pct <= 0 or max_pct <= 0:
+        return 0
+    dollar_amount = capital * min(risk_pct, max_pct)
     return int(dollar_amount / price)
 
 
@@ -50,27 +58,31 @@ def volatility_scaled_size(
     price: float,
     atr: float,
     target_risk_pct: float = 0.01,
+    max_pct: float = 1.0,
 ) -> int:
     """
     Volatility-scaled position sizing (ATR-based).
 
-    Size = (capital * target_risk_pct) / ATR
-
-    So a more volatile asset gets a smaller position.
+    Shares = (capital * target_risk_pct) / ATR, so a more volatile asset
+    gets a smaller position. Notional is capped at ``max_pct`` of capital
+    so a tiny ATR cannot lever the account without bound.
 
     Args:
         capital:         Portfolio value.
         price:           Current price.
         atr:             Current ATR value.
         target_risk_pct: Fraction of capital at risk per ATR move.
+        max_pct:         Maximum fraction of capital in notional terms.
 
     Returns:
         Number of shares/units.
     """
-    if atr <= 0:
+    if atr <= 0 or capital <= 0 or price <= 0 or target_risk_pct <= 0 or max_pct <= 0:
         return 0
     dollar_risk = capital * target_risk_pct
-    return int(dollar_risk / atr)
+    shares = int(dollar_risk / atr)
+    max_shares = int((capital * max_pct) / price)
+    return max(0, min(shares, max_shares))
 
 
 def kelly_size(
@@ -100,7 +112,7 @@ def kelly_size(
     Returns:
         Number of shares.
     """
-    if avg_loss <= 0:
+    if avg_loss <= 0 or avg_win <= 0 or capital <= 0 or price <= 0:
         return 0
     win_loss_ratio = avg_win / avg_loss
     kelly_pct = (win_loss_ratio * win_rate - (1 - win_rate)) / win_loss_ratio
@@ -283,10 +295,13 @@ def apply_risk_filter(
     """
     df = signals_df.copy()
     rolling_max = equity_curve.cummax()
-    drawdown = (equity_curve - rolling_max) / rolling_max
-    halted = drawdown <= -max_drawdown_limit
+    drawdown = (equity_curve - rolling_max) / rolling_max.replace(0, np.nan)
+    # Once the limit is breached, stay flat. Resuming on the same path
+    # would use the recovery that only exists because trading continued.
+    breached = (drawdown <= -max_drawdown_limit).fillna(False)
+    halted = breached.astype(int).cummax().astype(bool)
     df.loc[halted, "Position"] = 0
-    n_halted = halted.sum()
+    n_halted = int(halted.sum())
     if n_halted:
         logger.info(f"[RiskManager] {n_halted} bars halted due to drawdown limit.")
     return df
