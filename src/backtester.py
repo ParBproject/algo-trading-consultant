@@ -17,8 +17,7 @@ Usage::
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -69,6 +68,93 @@ class PerformanceMetrics:
         return "\n".join(lines)
 
 
+def _round_trip_returns(equity: pd.Series, positions: pd.Series) -> list[float]:
+    """Percent return of each position, including entry and exit costs.
+
+    The base is the equity on the bar before the fill, so the entry cost
+    is part of the trade. A sign flip closes one trade and opens another.
+    """
+    pos = positions.fillna(0).to_numpy(dtype=float)
+    eq = equity.to_numpy(dtype=float)
+    trips: list[float] = []
+    entry_i: int | None = None
+
+    def _append(exit_i: int, open_i: int) -> None:
+        base_i = open_i - 1 if open_i > 0 else open_i
+        base = eq[base_i]
+        end = eq[exit_i]
+        if np.isfinite(base) and base != 0 and np.isfinite(end):
+            trips.append(float(end / base - 1))
+
+    for i, cur in enumerate(pos):
+        prev = float(pos[i - 1]) if i else 0.0
+        sign_flip = prev * cur < 0
+        closed = (prev != 0 and cur == 0) or sign_flip
+        opened = (prev == 0 and cur != 0) or sign_flip
+        if closed and entry_i is not None:
+            _append(i, entry_i)
+            entry_i = None
+        if opened:
+            entry_i = i
+    if entry_i is not None:
+        _append(len(eq) - 1, entry_i)
+    return trips
+
+
+def execution_lag_rows(signals_df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Split the latest bars into ``(decision, fill)``.
+
+    A signal that uses the close of bar *t* is not tradable at that close.
+    ``decision`` is the last completed signal bar. ``fill`` is the next bar,
+    which is the first bar where that decision may be executed. Callers must
+    trade ``decision["Position"]`` at the fill bar's price, never the fill
+    bar's own signal.
+    """
+    if len(signals_df) < 2:
+        raise ValueError("Need a completed signal bar and a later fill bar")
+    return signals_df.iloc[-2], signals_df.iloc[-1]
+
+
+def _lookup_signal(signals: pd.Series, when) -> float:
+    """Match a backtrader bar date to a signal index.
+
+    Signal indexes are often timezone-aware timestamps. Backtrader exposes
+    the bar as a naive date, and a direct ``Series.get`` on that timestamp
+    misses every row.
+    """
+    indexed = signals.copy()
+    indexed.index = pd.to_datetime(indexed.index)
+    if getattr(indexed.index, "tz", None) is not None:
+        indexed.index = indexed.index.tz_localize(None)
+    indexed.index = indexed.index.normalize()
+    indexed = indexed[~indexed.index.duplicated(keep="last")]
+    key = pd.Timestamp(when)
+    if key.tzinfo is not None:
+        key = key.tz_localize(None)
+    key = key.normalize()
+    value = indexed.get(key, 0)
+    return float(0 if pd.isna(value) else value)
+
+
+def _slice_from(
+    equity: pd.Series,
+    position: pd.Series,
+    metrics_start,
+) -> tuple[pd.Series, pd.Series]:
+    """Keep the bar before ``metrics_start`` as the equity base."""
+    start_ts = pd.Timestamp(metrics_start)
+    if equity.index.tz is not None and start_ts.tzinfo is None:
+        start_ts = start_ts.tz_localize(equity.index.tz)
+    elif equity.index.tz is None and start_ts.tzinfo is not None:
+        start_ts = start_ts.tz_localize(None)
+    later = equity.index[equity.index >= start_ts]
+    if len(later) == 0:
+        raise ValueError("metrics_start is after the last bar")
+    pos = int(equity.index.get_loc(later[0]))
+    start = max(pos - 1, 0)
+    return equity.iloc[start:], position.iloc[start:]
+
+
 def _compute_metrics(
     equity: pd.Series,
     positions: pd.Series,
@@ -81,7 +167,10 @@ def _compute_metrics(
     # Annualisation
     total_ret = equity.iloc[-1] / equity.iloc[0] - 1
     n_years = len(equity) / bars_per_year
-    annual_ret = (1 + total_ret) ** (1 / max(n_years, 1e-6)) - 1
+    if total_ret <= -1:
+        annual_ret = -1.0
+    else:
+        annual_ret = (1 + total_ret) ** (1 / max(n_years, 1e-6)) - 1
     vol_annual = returns.std() * np.sqrt(bars_per_year)
 
     # Sharpe
@@ -89,10 +178,13 @@ def _compute_metrics(
     sharpe = (excess.mean() / returns.std() * np.sqrt(bars_per_year)
               if returns.std() > 0 else 0.0)
 
-    # Sortino (downside only)
-    downside = returns[returns < 0]
-    sortino = (excess.mean() / downside.std() * np.sqrt(bars_per_year)
-               if len(downside) > 0 and downside.std() > 0 else 0.0)
+    # Sortino uses the full-sample downside deviation. The standard
+    # deviation of the negative returns alone drops the zero-contribution
+    # up days and is undefined when only one down bar exists.
+    downside = np.minimum(returns.to_numpy(dtype=float), 0.0)
+    downside_dev = float(np.sqrt(np.mean(downside ** 2))) if len(downside) else 0.0
+    sortino = (float(excess.mean()) / downside_dev * np.sqrt(bars_per_year)
+               if downside_dev > 0 else 0.0)
 
     # Max drawdown
     running_max = equity.cummax()
@@ -108,33 +200,17 @@ def _compute_metrics(
     # Calmar
     calmar = annual_ret / abs(max_dd) if max_dd != 0 else 0.0
 
-    # Trade-level stats
-    trade_changes = positions.diff().fillna(0)
-    trade_entries = trade_changes[trade_changes != 0].index
-    num_trades = len(trade_entries)
-
-    trade_returns_list: list[float] = []
-    entry_i: Optional[int] = None
-    entry_pos: int = 0
-    pos_arr = positions.values
-    ret_arr = returns.values
-    eq_arr = equity.values
-
-    # Simple per-trade P&L using equity snapshots
-    prev_eq = equity.iloc[0]
-    for i in range(1, len(equity)):
-        if positions.iloc[i] != positions.iloc[i - 1]:
-            if entry_i is not None:
-                trade_ret = (eq_arr[i] - prev_eq) / prev_eq
-                trade_returns_list.append(trade_ret)
-            prev_eq = eq_arr[i]
-            entry_i = i
+    # One round trip per entry. A flip closes the open trade and opens
+    # the next. The position still open on the last bar is marked to
+    # the last equity value so it is not dropped from the stats.
+    trade_returns_list = _round_trip_returns(equity, positions)
+    num_trades = len(trade_returns_list)
 
     win_rate = (np.array(trade_returns_list) > 0).mean() if trade_returns_list else 0.0
     gains = sum(r for r in trade_returns_list if r > 0)
     losses = abs(sum(r for r in trade_returns_list if r < 0))
-    profit_factor = gains / losses if losses > 0 else np.inf
-    avg_trade_ret = np.mean(trade_returns_list) if trade_returns_list else 0.0
+    profit_factor = gains / losses if losses > 0 else (np.inf if gains > 0 else 0.0)
+    avg_trade_ret = float(np.mean(trade_returns_list)) if trade_returns_list else 0.0
 
     return PerformanceMetrics(
         total_return=total_ret,
@@ -165,13 +241,16 @@ class VectorizedBacktester:
         - Parameter optimization (thousands of runs).
 
     Limitations:
-        - Assumes next-bar execution (no intrabar simulation).
+        - Fills on the next bar's close (no intrabar path).
+        - Positions are weights (+1, -1, or 0), not share counts.
         - No partial fills or order books.
 
     Args:
         initial_capital: Starting portfolio value in dollars.
-        commission:      Round-trip commission as fraction (0.001 = 0.1%).
-        slippage:        Slippage as fraction of price (0.0005 = 0.05%).
+        commission:      One-way commission as a fraction of traded notional
+                         (0.001 = 10 bps each time the weight changes).
+        slippage:        One-way slippage as a fraction of traded notional
+                         (0.0005 = 5 bps). Charged on turnover, with commission.
         bars_per_year:   Trading bars per year (252 for daily stocks).
         risk_free_rate:  Annual risk-free rate for Sharpe calculation.
     """
@@ -187,37 +266,46 @@ class VectorizedBacktester:
         df: pd.DataFrame,
         position_col: str = "Position",
         price_col: str = "Close",
+        metrics_start=None,
     ) -> PerformanceMetrics:
         """
         Run vectorized backtest.
 
+        The position on bar *t* is the signal from bar *t-1*. A signal that
+        reads the close cannot be filled at that same close.
+
+        Commission and slippage are one-way costs on absolute turnover.
+        A flip from long to short turns over two units of weight.
+
         Args:
             df:            Signal DataFrame with Position and Close columns.
-            position_col:  Column name for position signal (+1/-1/0).
-            price_col:     Column name for execution price.
+            position_col:  Column name for the desired position (+1/-1/0).
+            price_col:     Column name for the mark-to-market price.
+            metrics_start: If set, Sharpe and the other stats use returns
+                           from this timestamp forward. The prior bar is kept
+                           only as the equity base so the first in-window
+                           return is not dropped. Parameter search uses this
+                           to score a test fold without fitting on it.
 
         Returns:
             PerformanceMetrics dataclass with full statistics + equity curve.
         """
-        df = df[[position_col, price_col]].copy().dropna()
-        position = df[position_col].shift(1).fillna(0)  # execute next bar
-        price = df[price_col]
+        frame = df[[position_col, price_col]].copy().dropna()
+        # Signal known at the close of t is held over t+1.
+        position = frame[position_col].shift(1).fillna(0.0)
+        price = frame[price_col]
 
-        # Slippage: degrade fill price by slippage in direction of trade
-        trade = position.diff().fillna(0)
-        fill_price = price * (1 + self.slippage * np.sign(trade))
-
-        # Returns: position * price return
-        price_return = price.pct_change()
+        price_return = price.pct_change().fillna(0.0)
         strategy_return = position * price_return
+        turnover = position.diff().abs().fillna(0.0)
+        trading_cost = turnover * (self.commission + self.slippage)
+        net_return = strategy_return - trading_cost
+        equity = self.initial_capital * (1.0 + net_return).cumprod()
 
-        # Commission: charge on every position change
-        commission_drag = trade.abs() * self.commission
-        net_return = strategy_return - commission_drag
-
-        # Equity curve
-        equity = self.initial_capital * (1 + net_return).cumprod()
-        equity.iloc[0] = self.initial_capital
+        if metrics_start is not None:
+            equity, position = _slice_from(equity, position, metrics_start)
+        if len(equity) < 2:
+            raise ValueError("Need at least two bars to compute returns")
 
         metrics = _compute_metrics(equity, position, self.bars_per_year,
                                    self.risk_free_rate)
@@ -269,9 +357,10 @@ def run_backtrader(
             self.equity_history: list[float] = []
 
         def next(self):
-            dt = self.datas[0].datetime.date(0)
-            ts = pd.Timestamp(dt)
-            sig = self.signals.get(ts, 0)
+            # The bar is complete, so its signal is known. Backtrader fills
+            # the market order on the next bar; this method does not fill
+            # at the signal close.
+            sig = _lookup_signal(self.signals, self.datas[0].datetime.date(0))
             current_pos = self.getposition().size
 
             if sig == 1 and current_pos <= 0:
@@ -314,15 +403,20 @@ def walk_forward_test(
     slippage: float = 0.0005,
 ) -> list[PerformanceMetrics]:
     """
-    Run walk-forward out-of-sample validation.
+    Score a fixed strategy on each walk-forward test fold.
+
+    The factory is not refit. Each fold sees history only through the end
+    of that test fold, and the reported metrics use the test window. Bars
+    before the test window warm up indicators; they are not a parameter
+    search. ``StrategyOptimizer`` is what holds out a final untouched tail.
 
     Args:
         df:               Full OHLCV DataFrame.
-        strategy_factory: Callable() -> BaseStrategy instance.
-        n_splits:         Number of folds (in-sample fit, out-of-sample test).
+        strategy_factory: Callable() -> strategy with ``generate_signals``.
+        n_splits:         Number of TimeSeriesSplit folds.
         initial_capital:  Capital per fold.
-        commission:       Commission fraction.
-        slippage:         Slippage fraction.
+        commission:       One-way commission fraction.
+        slippage:         One-way slippage fraction.
 
     Returns:
         List of PerformanceMetrics, one per out-of-sample fold.
@@ -332,12 +426,12 @@ def walk_forward_test(
     bt = VectorizedBacktester(initial_capital, commission, slippage)
     fold_metrics: list[PerformanceMetrics] = []
 
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(df)):
-        test_df = df.iloc[test_idx]
+    for fold, (_train_idx, test_idx) in enumerate(tscv.split(df)):
+        history = df.iloc[: test_idx[-1] + 1]
         strategy = strategy_factory()
         try:
-            signals_df = strategy.generate_signals(test_df)
-            metrics = bt.run(signals_df)
+            signals_df = strategy.generate_signals(history)
+            metrics = bt.run(signals_df, metrics_start=df.index[test_idx[0]])
             fold_metrics.append(metrics)
             logger.info(f"Fold {fold+1}/{n_splits} Sharpe={metrics.sharpe_ratio:.2f}")
         except Exception as e:
