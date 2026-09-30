@@ -83,10 +83,15 @@ def plot_equity_curve(
     ax_eq.plot(norm_eq.index, norm_eq.values, color="#2196F3", lw=1.5, label="Strategy")
 
     if benchmark is not None:
-        norm_bm = benchmark / benchmark.iloc[0] * 100
-        norm_bm = norm_bm.reindex(norm_eq.index).ffill()
-        ax_eq.plot(norm_bm.index, norm_bm.values, color="#9E9E9E",
-                   lw=1.0, linestyle="--", label="Benchmark")
+        # Rebase on the strategy window. Dividing by the benchmark's own
+        # first row first leaves earlier history in the level, so the line
+        # does not start at 100 on the date the strategy starts.
+        aligned = benchmark.reindex(norm_eq.index).ffill()
+        valid = aligned.dropna()
+        if len(valid) and float(valid.iloc[0]) != 0:
+            norm_bm = aligned / float(valid.iloc[0]) * 100
+            ax_eq.plot(norm_bm.index, norm_bm.values, color="#9E9E9E",
+                       lw=1.0, linestyle="--", label="Benchmark")
 
     ax_eq.set_title(title, fontsize=14, fontweight="bold")
     ax_eq.set_ylabel("Portfolio Value (rebased 100)")

@@ -168,12 +168,17 @@ class PaperExecutor(BaseExecutor):
         held = self._positions[symbol].qty if symbol in self._positions else 0
         new_qty = held + qty if side == "buy" else held - qty
 
-        # Opening or adding risk cannot exceed current equity. Reducing a
-        # position (including a full close) is always allowed.
+        # Opening or adding risk cannot leave absolute notional above
+        # current equity. The check is on the resulting position, not the
+        # ticket size: short proceeds increase cash, so a second short can
+        # otherwise stack past the account. Reducing exposure, including a
+        # cover after a loss, stays allowed.
         increases = abs(new_qty) > abs(held)
-        if increases and trade_value > self.get_equity() + 1e-6:
+        resulting_notional = abs(new_qty) * price
+        if increases and resulting_notional > self.get_equity() + 1e-6:
             logger.warning(
-                f"Order notional {trade_value:.2f} exceeds equity {self.get_equity():.2f}"
+                f"Resulting notional {resulting_notional:.2f} exceeds equity "
+                f"{self.get_equity():.2f}"
             )
             order.status = "rejected"
             self._orders.append(order)

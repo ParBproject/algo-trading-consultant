@@ -276,6 +276,55 @@ class PortfolioRiskState:
         return self.halted
 
 
+def order_to_target(
+    current_qty: int,
+    target: int,
+    open_qty: int,
+) -> tuple[str, int] | None:
+    """Order that moves ``current_qty`` to the signed target size.
+
+    ``target`` is +1 long, -1 short, or 0 flat. ``open_qty`` is the share
+    count used when a new risk position is opened. A book that is already
+    in the requested direction is left as it is (no resize). A flip covers
+    the old side and opens the new one in the same order. ``open_qty`` of 0
+    flattens a position that points the wrong way and does not open a new one.
+
+    Returns ``(side, qty)`` or ``None`` when no order is required.
+    """
+    if target not in (-1, 0, 1):
+        raise ValueError(f"target must be -1, 0, or 1; got {target}")
+    if open_qty < 0:
+        raise ValueError(f"open_qty must be non-negative; got {open_qty}")
+    if target != 0 and current_qty * target > 0:
+        return None
+    desired = 0 if target == 0 else target * open_qty
+    delta = desired - current_qty
+    if delta == 0:
+        return None
+    side = "buy" if delta > 0 else "sell"
+    return side, abs(delta)
+
+
+def actions_for_bar(
+    *,
+    halted: bool,
+    target: int,
+    current_qty: int,
+    open_qty: int,
+    stop_hit: bool,
+) -> list[tuple[str, int]]:
+    """Orders for one completed bar.
+
+    A drawdown halt or a stop flattens the book and does not open a new
+    position on that same bar.
+    """
+    if halted or stop_hit:
+        flatten = order_to_target(current_qty, 0, 0)
+        return [] if flatten is None else [flatten]
+    order = order_to_target(current_qty, target, open_qty)
+    return [] if order is None else [order]
+
+
 def apply_risk_filter(
     signals_df: pd.DataFrame,
     equity_curve: pd.Series,
