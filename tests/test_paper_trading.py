@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import pytest
 
+from src.backtester import VectorizedBacktester
 from src.executor import AlpacaExecutor, CCXTExecutor, PaperExecutor
 from src.risk_manager import (
+    actions_for_bar,
     apply_risk_filter,
     fixed_pct_size,
     kelly_size,
+    order_to_target,
     volatility_scaled_size,
 )
 import pandas as pd
@@ -46,6 +49,72 @@ def test_buy_slippage_and_commission_hit_equity_once():
     book.submit_order("AAA", "buy", 10)
     # Fill 100.10, commission 10 bps of notional, mark stays at the mid.
     assert book.get_equity() == pytest.approx(100_000 - 10 * 0.10 - 1001 * 0.001)
+
+
+def test_stacking_shorts_cannot_exceed_equity_but_a_cover_can():
+    book = PaperExecutor(initial_capital=100_000, commission=0, slippage=0)
+    book.set_price("AAA", 100)
+    assert book.submit_order("AAA", "sell", 600).status == "filled"
+    assert book.get_positions()["AAA"].qty == -600
+    # A second short of 600 would leave 1,200 shares, $120k of notional.
+    assert book.submit_order("AAA", "sell", 600).status == "rejected"
+    assert book.get_positions()["AAA"].qty == -600
+
+    book.set_price("AAA", 200)
+    # Mark-to-market loss does not block the cover.
+    assert book.submit_order("AAA", "buy", 600).status == "filled"
+    assert book.get_positions() == {}
+    assert book.get_equity() == pytest.approx(40_000)
+
+
+def test_paper_replay_matches_next_close_backtest():
+    """The in-memory broker and the vectorized engine fill on the same bar.
+
+    Signal turns on at the second close (100) and off at the fourth (110).
+    Both paths buy the 100 print and sell the later 110 print.
+    """
+    df = pd.DataFrame(
+        {
+            "Close": [100, 100, 100, 110, 110],
+            "Position": [0, 1, 1, 0, 0],
+        },
+        index=pd.bdate_range("2020-01-01", periods=5),
+    )
+    metrics = VectorizedBacktester(
+        initial_capital=100_000, commission=0, slippage=0, risk_free_rate=0
+    ).run(df)
+
+    book = PaperExecutor(initial_capital=100_000, commission=0, slippage=0)
+    for i in range(1, len(df)):
+        price = float(df["Close"].iloc[i])
+        book.set_price("AAA", price)
+        held = book.get_positions().get("AAA")
+        current = held.qty if held else 0
+        order = order_to_target(
+            current,
+            int(df["Position"].iloc[i - 1]),
+            fixed_pct_size(book.get_equity(), price, risk_pct=1.0),
+        )
+        if order is not None:
+            assert book.submit_order("AAA", order[0], order[1]).status == "filled"
+
+    assert metrics.total_return == pytest.approx(0.10)
+    assert metrics.equity_curve.iloc[-1] == pytest.approx(110_000)
+    assert book.get_equity() == pytest.approx(110_000)
+    assert book.get_positions() == {}
+
+
+def test_order_to_target_flips_and_halt_does_not_reenter():
+    assert order_to_target(40, -1, 10) == ("sell", 50)
+    assert order_to_target(-10, 1, 10) == ("buy", 20)
+    assert order_to_target(40, 1, 10) is None
+    assert order_to_target(40, 0, 10) == ("sell", 40)
+    assert actions_for_bar(
+        halted=True, target=1, current_qty=40, open_qty=10, stop_hit=False
+    ) == [("sell", 40)]
+    assert actions_for_bar(
+        halted=False, target=-1, current_qty=40, open_qty=10, stop_hit=True
+    ) == [("sell", 40)]
 
 
 def test_paper_rejects_orders_larger_than_equity():

@@ -22,12 +22,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from loguru import logger
 
 from data.fetcher import fetch_yfinance
-from src.backtester import VectorizedBacktester, execution_lag_rows
+from src.backtester import (
+    VectorizedBacktester, buy_and_hold_equity, execution_lag_rows
+)
 from src.executor import get_executor, PaperExecutor
 from src.risk_manager import (
-    fixed_pct_size, compute_stops, PortfolioRiskState, is_stop_hit
+    actions_for_bar, compute_stops, fixed_pct_size, is_stop_hit, PortfolioRiskState
 )
-from src.strategies import get_strategy
+from src.strategies import get_strategy, split_strategy_params
 from src.utils import (
     load_config, setup_logging, plot_equity_curve, plot_signals, generate_report
 )
@@ -69,7 +71,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", action="store_true",
                         help="Generate PDF report after backtest")
     parser.add_argument("--log-level", default="INFO")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.strategy_params = {}
+    return args
+
+
+def apply_config(args: argparse.Namespace, cfg: dict) -> list[str]:
+    """Copy a YAML config onto CLI args. Returns unused strategy keys.
+
+    A config file cannot turn on a live order route by itself.
+    """
+    args.ticker = cfg["data"]["tickers"][0]
+    args.start = cfg["data"]["start_date"]
+    args.end = cfg["data"].get("end_date")
+    args.interval = cfg["data"].get("interval", args.interval)
+    args.strategy = cfg["strategy"]["name"]
+    chosen, ignored = split_strategy_params(
+        args.strategy, cfg["strategy"].get("params")
+    )
+    args.strategy_params = chosen
+    args.capital = cfg["backtesting"]["initial_capital"]
+    args.commission = cfg["backtesting"]["commission_pct"]
+    args.slippage = cfg["backtesting"]["slippage_pct"]
+    args.broker = cfg["execution"]["broker"]
+    args.position_pct = cfg["risk"].get("max_position_pct", args.position_pct)
+    args.log_level = cfg["logging"]["level"]
+    if cfg["execution"].get("paper_trading", True) is False and not args.allow_live:
+        logger.warning(
+            "Config set execution.paper_trading to false. "
+            "Live endpoints stay disabled without --allow-live; using the paper broker."
+        )
+        args.broker = "paper"
+    return ignored
 
 
 # ─── Backtest mode ────────────────────────────────────────────────────────────
@@ -78,14 +111,7 @@ def run_backtest(args: argparse.Namespace) -> None:
     logger.info(f"=== BACKTEST MODE | {args.strategy} on {args.ticker} ===")
 
     df = fetch_yfinance(args.ticker, args.start, args.end, args.interval)
-    strategy = get_strategy(args.strategy)
-
-    if args.strategy == "pairs_trading":
-        raise SystemExit(
-            "Pairs signals need both legs: generate_signals(df_a, df_b). "
-            "The single-asset backtest does not price a two-leg book."
-        )
-
+    strategy = get_strategy(args.strategy, **args.strategy_params)
     signals_df = strategy.generate_signals(df)
 
     bt = VectorizedBacktester(
@@ -96,11 +122,11 @@ def run_backtest(args: argparse.Namespace) -> None:
     metrics = bt.run(signals_df)
     print(metrics.summary())
 
-    # Buy-and-hold over the same bars the strategy equity covers.
-    aligned_returns = (
-        df["Close"].pct_change().reindex(metrics.equity_curve.index).fillna(0)
+    # Buy-and-hold from the first close on the strategy equity index.
+    bah_equity = buy_and_hold_equity(
+        df["Close"].reindex(metrics.equity_curve.index),
+        args.capital,
     )
-    bah_equity = args.capital * (1 + aligned_returns).cumprod()
 
     # Charts
     Path("reports").mkdir(exist_ok=True)
@@ -138,7 +164,7 @@ def run_live(args: argparse.Namespace) -> None:
     logger.info(f"=== LIVE MODE | {args.strategy} on {args.ticker} via {args.broker} ===")
 
     executor = build_executor(args)
-    strategy = get_strategy(args.strategy)
+    strategy = get_strategy(args.strategy, **args.strategy_params)
     risk_state = PortfolioRiskState(
         peak_equity=args.capital,
         current_equity=args.capital,
@@ -163,44 +189,41 @@ def run_live(args: argparse.Namespace) -> None:
 
         equity = executor.get_equity()
         risk_state.update(equity)
-        if risk_state.check_halt():
-            logger.warning("Portfolio halt active – skipping bar.")
-            continue
 
         current_positions = executor.get_positions()
         current_qty = current_positions.get(args.ticker, None)
         current_qty_val = current_qty.qty if current_qty else 0
 
-        # Check stops
+        stop_hit = False
         if args.ticker in open_stops:
             sl, tp, direction = open_stops[args.ticker]
-            hit, reason = is_stop_hit(price, direction, sl, tp)
-            if hit:
+            stop_hit, reason = is_stop_hit(price, direction, sl, tp)
+            if stop_hit:
                 logger.info(f"Stop hit ({reason}) @ {price:.2f} – closing position")
-                executor.close_position(args.ticker)
-                del open_stops[args.ticker]
+
+        # A halt flattens. It does not skip the bar and leave the book open,
+        # and it does not skip the stop check above.
+        halted = risk_state.check_halt()
+        qty = fixed_pct_size(equity, price, risk_pct=args.position_pct)
+        for side, order_qty in actions_for_bar(
+            halted=halted,
+            target=position,
+            current_qty=current_qty_val,
+            open_qty=qty,
+            stop_hit=stop_hit,
+        ):
+            result = executor.submit_order(args.ticker, side, order_qty)
+            if result.status != "filled":
                 continue
-
-        # Enter / exit
-        if position == 1 and current_qty_val <= 0:
-            qty = fixed_pct_size(equity, price, risk_pct=args.position_pct)
-            if qty > 0:
-                executor.submit_order(args.ticker, "buy", qty)
-                stops = compute_stops(price, direction=1,
-                                      atr=float(decision.get("ATR", price * 0.02)))
-                open_stops[args.ticker] = (stops.stop_loss, stops.take_profit, 1)
-
-        elif position == -1 and current_qty_val >= 0:
-            qty = fixed_pct_size(equity, price, risk_pct=args.position_pct)
-            if qty > 0:
-                executor.submit_order(args.ticker, "sell", qty)
-                stops = compute_stops(price, direction=-1,
-                                      atr=float(decision.get("ATR", price * 0.02)))
-                open_stops[args.ticker] = (stops.stop_loss, stops.take_profit, -1)
-
-        elif position == 0 and current_qty_val != 0:
-            executor.close_position(args.ticker)
-            open_stops.pop(args.ticker, None)
+            if halted or stop_hit or position == 0:
+                open_stops.pop(args.ticker, None)
+            else:
+                stops = compute_stops(
+                    price,
+                    direction=position,
+                    atr=float(decision.get("ATR", price * 0.02)),
+                )
+                open_stops[args.ticker] = (stops.stop_loss, stops.take_profit, position)
 
     logger.info(f"Final equity: ${executor.get_equity():,.2f}")
     if isinstance(executor, PaperExecutor):
@@ -243,28 +266,21 @@ def build_executor(args: argparse.Namespace):
 def main() -> None:
     args = parse_args()
 
+    ignored: list[str] = []
     if args.config:
-        cfg = load_config(args.config)
-        # Override args from config where applicable
-        args.ticker = cfg["data"]["tickers"][0]
-        args.start = cfg["data"]["start_date"]
-        args.end = cfg["data"].get("end_date")
-        args.strategy = cfg["strategy"]["name"]
-        args.capital = cfg["backtesting"]["initial_capital"]
-        args.commission = cfg["backtesting"]["commission_pct"]
-        args.slippage = cfg["backtesting"]["slippage_pct"]
-        args.broker = cfg["execution"]["broker"]
-        args.position_pct = cfg["risk"].get("max_position_pct", args.position_pct)
-        args.log_level = cfg["logging"]["level"]
-        # A config file cannot turn on a live order route by itself.
-        if cfg["execution"].get("paper_trading", True) is False and not args.allow_live:
-            logger.warning(
-                "Config set execution.paper_trading to false. "
-                "Live endpoints stay disabled without --allow-live; using the paper broker."
-            )
-            args.broker = "paper"
+        ignored = apply_config(args, load_config(args.config))
 
     setup_logging(args.log_level)
+    if ignored:
+        logger.info(
+            f"Config keys not used by {args.strategy}: {', '.join(ignored)}"
+        )
+
+    if args.strategy == "pairs_trading":
+        raise SystemExit(
+            "Pairs signals need both legs: generate_signals(df_a, df_b). "
+            "The single-asset backtest does not price a two-leg book."
+        )
 
     if args.live:
         run_live(args)

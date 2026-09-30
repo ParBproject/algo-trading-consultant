@@ -164,9 +164,10 @@ def _compute_metrics(
     """Compute all performance metrics from equity curve and position series."""
     returns = equity.pct_change().dropna()
 
-    # Annualisation
+    # Annualisation uses the number of return observations. Counting the
+    # starting equity snapshot as a bar overstates the sample length.
     total_ret = equity.iloc[-1] / equity.iloc[0] - 1
-    n_years = len(equity) / bars_per_year
+    n_years = len(returns) / bars_per_year
     if total_ret <= -1:
         annual_ret = -1.0
     else:
@@ -271,11 +272,13 @@ class VectorizedBacktester:
         """
         Run vectorized backtest.
 
-        The position on bar *t* is the signal from bar *t-1*. A signal that
-        reads the close cannot be filled at that same close.
+        ``Position`` on bar *t* is the holding desired after seeing that
+        bar's close. It is filled at the next bar's close, so it does not
+        earn the close-to-close return that starts at the signal bar.
 
-        Commission and slippage are one-way costs on absolute turnover.
-        A flip from long to short turns over two units of weight.
+        Commission and slippage are one-way costs on absolute turnover,
+        charged at the fill. A flip from long to short turns over two
+        units of weight.
 
         Args:
             df:            Signal DataFrame with Position and Close columns.
@@ -291,23 +294,30 @@ class VectorizedBacktester:
             PerformanceMetrics dataclass with full statistics + equity curve.
         """
         frame = df[[position_col, price_col]].copy().dropna()
-        # Signal known at the close of t is held over t+1.
-        position = frame[position_col].shift(1).fillna(0.0)
+        signal = frame[position_col]
         price = frame[price_col]
+        # Position[t] is known only once close[t] exists, so it cannot be
+        # the fill at close[t]. The order goes out at close[t+1].
+        # The weight that earned close[t-1] -> close[t] was filled at
+        # close[t-1], which is Position[t-2].
+        filled = signal.shift(1).fillna(0.0)
+        held = signal.shift(2).fillna(0.0)
 
         price_return = price.pct_change().fillna(0.0)
-        strategy_return = position * price_return
-        turnover = position.diff().abs().fillna(0.0)
+        strategy_return = held * price_return
+        turnover = (filled - held).abs()
         trading_cost = turnover * (self.commission + self.slippage)
         net_return = strategy_return - trading_cost
         equity = self.initial_capital * (1.0 + net_return).cumprod()
 
         if metrics_start is not None:
-            equity, position = _slice_from(equity, position, metrics_start)
+            equity, filled = _slice_from(equity, filled, metrics_start)
         if len(equity) < 2:
             raise ValueError("Need at least two bars to compute returns")
 
-        metrics = _compute_metrics(equity, position, self.bars_per_year,
+        # Trade stats follow the position after the fill, so an exit that
+        # completes on the last close is a closed trade.
+        metrics = _compute_metrics(equity, filled, self.bars_per_year,
                                    self.risk_free_rate)
         logger.info(f"Backtest complete. Sharpe={metrics.sharpe_ratio:.2f}, "
                     f"MaxDD={metrics.max_drawdown:.2%}")
@@ -328,6 +338,10 @@ def run_backtrader(
 
     Wraps a pre-computed signal series into a backtrader strategy so that
     order fills, commissions, and slippage are handled by the backtrader engine.
+
+    Backtrader fills these market orders at the next bar's open. The
+    vectorized engine fills at the next bar's close. The two equity curves
+    are different execution models and are not expected to match.
 
     Args:
         df:                OHLCV DataFrame.
@@ -438,3 +452,18 @@ def walk_forward_test(
             logger.warning(f"Fold {fold+1} failed: {e}")
 
     return fold_metrics
+
+
+def buy_and_hold_equity(close: pd.Series, capital: float) -> pd.Series:
+    """Dollar path of holding the asset from the first close in ``close``.
+
+    The series starts at ``capital`` on the first timestamp. Later points
+    are ``capital * close_t / close_0``. No costs are charged.
+    """
+    prices = close.astype(float)
+    if len(prices) == 0:
+        raise ValueError("buy-and-hold needs at least one close")
+    base = float(prices.iloc[0])
+    if not np.isfinite(base) or base == 0:
+        raise ValueError("buy-and-hold start price must be a non-zero finite number")
+    return capital * prices / base

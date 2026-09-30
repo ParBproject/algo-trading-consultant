@@ -136,7 +136,8 @@ class MomentumStrategy(BaseStrategy):
         Long  : MACD line crosses below Signal line
         Short : MACD line crosses above Signal line
 
-    Optional ATR trailing stop applied during position holding.
+    ATR is attached for the paper loop's stop distance. This signal does
+    not apply a trailing stop of its own.
 
     Args:
         fast_period:    MACD fast EMA period.
@@ -330,6 +331,29 @@ _REGISTRY: dict[str, type[BaseStrategy]] = {
     "momentum": MomentumStrategy,
     "pairs_trading": PairsTradingStrategy,
 }
+
+
+def split_strategy_params(
+    name: str,
+    params: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Keep constructor keys for ``name`` and list the rest.
+
+    The sample config stores mean-reversion, momentum, and pairs keys in
+    one mapping. Only the selected strategy's fields are applied.
+    """
+    from dataclasses import fields
+
+    cls = _REGISTRY.get(name)
+    if cls is None:
+        raise ValueError(
+            f"Unknown strategy '{name}'. Available: {list(_REGISTRY)}"
+        )
+    raw = dict(params or {})
+    allowed = {item.name for item in fields(cls)} - {"name"}
+    chosen = {key: value for key, value in raw.items() if key in allowed}
+    ignored = sorted(key for key in raw if key not in allowed)
+    return chosen, ignored
 
 
 def get_strategy(name: str, **params: Any) -> BaseStrategy:

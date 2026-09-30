@@ -16,14 +16,41 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
+import inspect
+
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from loguru import logger
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 CACHE_DIR = Path("data/cache")
 OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
+_PRICE_NAMES = {"open", "high", "low", "close", "adj close", "volume"}
+
+
+def _flatten_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a frame whose columns are price names, not a ticker level.
+
+    Current ``yfinance.download`` defaults to a MultiIndex of
+    ``(Price, Ticker)`` even for one symbol. Older frames are already flat.
+    A ticker-first orientation is accepted too.
+    """
+    out = df.copy()
+    columns = out.columns
+    if isinstance(columns, pd.MultiIndex):
+        chosen: int | None = None
+        for level in range(columns.nlevels):
+            names = {str(value).strip().lower() for value in columns.get_level_values(level)}
+            if names & _PRICE_NAMES:
+                chosen = level
+                break
+        if chosen is None:
+            raise ValueError(
+                "Could not find Open/High/Low/Close/Volume in MultiIndex columns."
+            )
+        out.columns = columns.get_level_values(chosen)
+    out.columns = [str(column).strip().title() for column in out.columns]
+    return out
 
 
 # ─── Cache helpers ────────────────────────────────────────────────────────────
@@ -54,15 +81,13 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     Clean and enrich raw OHLCV data.
 
     Steps:
-        1. Forward-fill small gaps (up to 5 bars).
-        2. Drop rows where all OHLCV values are NaN.
-        3. Add log-returns and typical price.
-        4. Ensure DatetimeIndex with UTC-aware timestamps.
+        1. Flatten a yfinance-style MultiIndex down to price names.
+        2. Forward-fill small gaps (up to 5 bars).
+        3. Drop rows where all OHLCV values are NaN.
+        4. Add log-returns and typical price.
+        5. Ensure DatetimeIndex with UTC-aware timestamps.
     """
-    df = df.copy()
-
-    # Standardise column names
-    df.columns = [c.strip().title() for c in df.columns]
+    df = _flatten_ohlcv_columns(df)
 
     # Keep only standard OHLCV cols that exist
     cols = [c for c in OHLCV_COLS if c in df.columns]
@@ -120,10 +145,21 @@ def fetch_yfinance(
             return cached
 
     logger.info(f"Fetching {ticker} [{interval}] from {start} to {end}")
-    raw = yf.download(ticker, start=start, end=end, interval=interval,
-                      auto_adjust=adjust, progress=False)
+    import yfinance as yf
 
-    if raw.empty:
+    download_kwargs = {
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "auto_adjust": adjust,
+        "progress": False,
+    }
+    # Default True since yfinance 0.2.50, which nests the ticker on the columns.
+    if "multi_level_index" in inspect.signature(yf.download).parameters:
+        download_kwargs["multi_level_index"] = False
+    raw = yf.download(ticker, **download_kwargs)
+
+    if raw is None or raw.empty:
         raise ValueError(f"No data returned for {ticker}")
 
     df = preprocess(raw)
