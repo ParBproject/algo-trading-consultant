@@ -1,13 +1,8 @@
-"""
-src/indicators.py
-=================
-Pure-function technical indicator library.
+"""Technical indicators.
 
-Design principles:
-    - Every function is a pure function: no side effects, no mutation.
-    - All inputs/outputs are pd.Series or pd.DataFrame.
-    - Functions are composable; pipe them to build complex signals.
-    - NaN-safe: guard against empty or too-short series gracefully.
+Each function takes a price series, or high/low/close/volume columns, and
+returns a series or a frame. Windows that do not fit the input raise
+``ValueError``.
 """
 from __future__ import annotations
 
@@ -15,15 +10,11 @@ import numpy as np
 import pandas as pd
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
 def _check_min_length(series: pd.Series, min_len: int, name: str) -> None:
     if len(series) < min_len:
         raise ValueError(f"{name} requires at least {min_len} data points; "
                          f"got {len(series)}.")
 
-
-# ─── Moving Averages ──────────────────────────────────────────────────────────
 
 def sma(series: pd.Series, period: int = 20) -> pd.Series:
     """Simple Moving Average."""
@@ -48,14 +39,8 @@ def wma(series: pd.Series, period: int = 20) -> pd.Series:
     return series.rolling(period).apply(_wma, raw=True).rename(f"WMA_{period}")
 
 
-# ─── Momentum / Oscillators ───────────────────────────────────────────────────
-
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """
-    Relative Strength Index (Wilder smoothing).
-
-    Returns values in [0, 100].  Typical thresholds: 30 oversold / 70 overbought.
-    """
+    """Relative Strength Index with Wilder smoothing, on a 0–100 scale."""
     _check_min_length(series, period + 1, "RSI")
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -111,8 +96,6 @@ def roc(series: pd.Series, period: int = 12) -> pd.Series:
         f"ROC_{period}"
     )
 
-
-# ─── Volatility ───────────────────────────────────────────────────────────────
 
 def bollinger_bands(
     series: pd.Series,
@@ -177,8 +160,6 @@ def keltner_channels(
     return pd.concat([middle, upper, lower], axis=1)
 
 
-# ─── Volume ───────────────────────────────────────────────────────────────────
-
 def vwap(
     high: pd.Series,
     low: pd.Series,
@@ -223,19 +204,13 @@ def cmf(
     )
 
 
-# ─── Trend ────────────────────────────────────────────────────────────────────
-
 def adx(
     high: pd.Series,
     low: pd.Series,
     close: pd.Series,
     period: int = 14,
 ) -> pd.DataFrame:
-    """
-    Average Directional Index (+DI, -DI, ADX).
-
-    ADX > 25 indicates a strong trend.
-    """
+    """Average Directional Index, plus +DI and -DI."""
     tr_val = atr(high, low, close, period)
     up_move = high.diff()
     down_move = -low.diff()
@@ -300,8 +275,6 @@ def supertrend(
 
     return pd.DataFrame({"SuperTrend": supertrend_vals, "ST_Direction": direction})
 
-
-# ─── Z-Score / Statistical ────────────────────────────────────────────────────
 
 def zscore(series: pd.Series, period: int = 20) -> pd.Series:
     """Rolling z-score: (price - rolling_mean) / rolling_std."""

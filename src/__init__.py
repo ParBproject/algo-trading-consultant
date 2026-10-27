@@ -1,7 +1,2 @@
-"""
-algo-trading-consultant
-=======================
-Flexible Python framework for algorithmic trading bots.
-Educational use only – not financial advice.
-"""
+"""Research backtests and an in-memory paper broker."""
 __version__ = "1.0.0"

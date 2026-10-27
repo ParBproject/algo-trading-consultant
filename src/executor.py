@@ -1,22 +1,8 @@
-"""
-src/executor.py
-===============
-Broker API wrappers for paper and live order execution.
+"""Order execution.
 
-Supported brokers:
-    - Paper (in-memory simulation)
-    - Alpaca (stocks, paper + live)
-    - CCXT  (crypto exchanges)
-
-All executors implement the same interface::
-
-    executor.submit_order(symbol, direction, qty, order_type)
-    executor.get_positions()
-    executor.get_equity()
-
-The default route is the in-memory paper broker. Alpaca and CCXT read
-API keys from the environment and stay on paper or sandbox endpoints
-unless ``allow_live=True``.
+``PaperExecutor`` fills against the last price passed to ``set_price``.
+``AlpacaExecutor`` and ``CCXTExecutor`` read API keys from the environment
+and stay on a paper or sandbox endpoint unless ``allow_live`` is set.
 """
 from __future__ import annotations
 
@@ -30,8 +16,6 @@ from typing import Literal, Optional
 import pandas as pd
 from loguru import logger
 
-
-# ─── Order / Position models ──────────────────────────────────────────────────
 
 OrderSide = Literal["buy", "sell"]
 OrderType = Literal["market", "limit", "stop"]
@@ -67,8 +51,6 @@ class Position:
         return self.qty * (self.current_price - self.avg_price)
 
 
-# ─── Base executor ────────────────────────────────────────────────────────────
-
 class BaseExecutor(ABC):
 
     @abstractmethod
@@ -102,19 +84,11 @@ class BaseExecutor(ABC):
         return self.submit_order(symbol, side, abs(pos.qty))
 
 
-# ─── Paper executor ───────────────────────────────────────────────────────────
-
 class PaperExecutor(BaseExecutor):
-    """
-    In-memory paper trading simulator.
+    """In-memory fills against the last ``set_price`` quote.
 
-    Simulates market fills with slippage and commission.
-    Designed for strategy testing without connecting to a broker.
-
-    Args:
-        initial_capital: Starting cash balance.
-        commission:      Fraction of trade value charged per order.
-        slippage:        Fraction of price added to fill (buys) or subtracted (sells).
+    Buys pay above the quote and sells receive below it, by ``slippage``.
+    ``commission`` is a fraction of the fill notional.
     """
 
     def __init__(
@@ -235,8 +209,6 @@ class PaperExecutor(BaseExecutor):
         return pd.DataFrame([vars(o) for o in self._orders if o.status == "filled"])
 
 
-# ─── Alpaca executor ──────────────────────────────────────────────────────────
-
 class AlpacaExecutor(BaseExecutor):
     """
     Alpaca Markets order executor.
@@ -328,8 +300,6 @@ class AlpacaExecutor(BaseExecutor):
         return float(account.portfolio_value)
 
 
-# ─── CCXT crypto executor ─────────────────────────────────────────────────────
-
 class CCXTExecutor(BaseExecutor):
     """
     CCXT-based crypto exchange executor.
@@ -417,8 +387,6 @@ class CCXTExecutor(BaseExecutor):
         balance = self._exchange.fetch_balance()
         return float(balance.get("USDT", {}).get("total", 0.0))
 
-
-# ─── Factory ──────────────────────────────────────────────────────────────────
 
 def get_executor(broker: str, **kwargs) -> BaseExecutor:
     """
