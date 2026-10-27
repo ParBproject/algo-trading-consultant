@@ -1,19 +1,8 @@
-"""
-src/risk_manager.py
-===================
-Position sizing, stop-loss, take-profit, and portfolio risk controls.
+"""Position size, stops, and a drawdown halt.
 
-Philosophy:
-    Risk management is applied *before* order submission.
-    All functions are pure – they compute sizes/flags from inputs only.
-
-Included:
-    - Fixed percentage sizing
-    - Volatility-scaled sizing (ATR-based)
-    - Kelly criterion (fractional)
-    - Stop-loss / take-profit / trailing stop price computation
-    - Max drawdown circuit breaker
-    - Portfolio heat check
+Sizing functions return a share count from the inputs they are given.
+``apply_risk_filter`` sets ``Position`` to zero from the first bar where
+drawdown exceeds the limit, and it stays flat after that.
 """
 from __future__ import annotations
 
@@ -22,8 +11,6 @@ import pandas as pd
 from dataclasses import dataclass
 from loguru import logger
 
-
-# ─── Position sizing ──────────────────────────────────────────────────────────
 
 def fixed_pct_size(
     capital: float,
@@ -106,7 +93,7 @@ def kelly_size(
         win_rate:       Historical win rate [0, 1].
         avg_win:        Average winning trade return (positive).
         avg_loss:       Average losing trade return (positive magnitude).
-        kelly_fraction: Scale full Kelly (0.25 = quarter Kelly, safer).
+        kelly_fraction: Scale applied to the full Kelly fraction (0.25 = quarter Kelly).
         max_pct:        Cap position at this fraction of capital.
 
     Returns:
@@ -121,8 +108,6 @@ def kelly_size(
     dollar_amount = capital * kelly_pct
     return int(dollar_amount / price)
 
-
-# ─── Stop levels ──────────────────────────────────────────────────────────────
 
 @dataclass
 class StopLevels:
@@ -239,16 +224,14 @@ def is_stop_hit(
     return False, ""
 
 
-# ─── Portfolio-level risk ─────────────────────────────────────────────────────
-
 @dataclass
 class PortfolioRiskState:
-    """Tracks portfolio-level risk metrics in real-time."""
+    """Drawdown state for the bar loop. Once halted, it stays halted."""
 
     peak_equity: float
     current_equity: float
     max_drawdown_limit: float = 0.15
-    max_portfolio_heat: float = 0.20   # max total open risk %
+    max_portfolio_heat: float = 0.20
     halted: bool = False
 
     @property

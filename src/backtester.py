@@ -1,19 +1,10 @@
-"""
-src/backtester.py
-=================
-Vectorized backtesting engine with realistic cost modeling.
+"""Single-asset backtest.
 
-Provides:
-    VectorizedBacktester  – Fast pandas-based simulation (good for optimization).
-    BacktraderRunner      – Wraps backtrader for event-driven realism.
-    PerformanceMetrics    – Sharpe, Sortino, Calmar, max drawdown, win rate, etc.
-
-Usage::
-
-    bt = VectorizedBacktester(initial_capital=100_000, commission=0.001,
-                              slippage=0.0005)
-    results = bt.run(signals_df)
-    print(results.metrics())
+``VectorizedBacktester`` fills a signal from bar t at the close of bar t+1
+and charges commission and slippage on absolute turnover. ``run_backtrader``
+fills market orders at the next bar's open, so the two equity curves differ.
+``walk_forward_test`` scores a fixed strategy on each test fold. It does not
+search parameters.
 """
 from __future__ import annotations
 
@@ -24,11 +15,9 @@ import pandas as pd
 from loguru import logger
 
 
-# ─── Performance metrics ──────────────────────────────────────────────────────
-
 @dataclass
 class PerformanceMetrics:
-    """Container for all backtest performance statistics."""
+    """Backtest statistics. ``equity_curve`` is in dollars."""
 
     total_return: float
     annual_return: float
@@ -230,30 +219,15 @@ def _compute_metrics(
     )
 
 
-# ─── Vectorized Backtester ────────────────────────────────────────────────────
-
 @dataclass
 class VectorizedBacktester:
-    """
-    Fast vectorized backtester using pandas/numpy.
+    """Backtest one weight series (+1, -1, or 0).
 
-    Suitable for:
-        - Strategy development and rapid iteration.
-        - Parameter optimization (thousands of runs).
-
-    Limitations:
-        - Fills on the next bar's close (no intrabar path).
-        - Positions are weights (+1, -1, or 0), not share counts.
-        - No partial fills or order books.
-
-    Args:
-        initial_capital: Starting portfolio value in dollars.
-        commission:      One-way commission as a fraction of traded notional
-                         (0.001 = 10 bps each time the weight changes).
-        slippage:        One-way slippage as a fraction of traded notional
-                         (0.0005 = 5 bps). Charged on turnover, with commission.
-        bars_per_year:   Trading bars per year (252 for daily stocks).
-        risk_free_rate:  Annual risk-free rate for Sharpe calculation.
+    The signal on bar t is filled at the close of bar t+1, so it does not
+    earn the return that starts at the signal close. Commission and slippage
+    are one-way fractions of absolute turnover. There is no intrabar path
+    and no partial fill. ``bars_per_year`` annualizes the ratios (252 for
+    daily bars). ``risk_free_rate`` is annual.
     """
 
     initial_capital: float = 100_000.0
@@ -290,8 +264,6 @@ class VectorizedBacktester:
                            return is not dropped. Parameter search uses this
                            to score a test fold without fitting on it.
 
-        Returns:
-            PerformanceMetrics dataclass with full statistics + equity curve.
         """
         frame = df[[position_col, price_col]].copy().dropna()
         signal = frame[position_col]
@@ -323,8 +295,6 @@ class VectorizedBacktester:
                     f"MaxDD={metrics.max_drawdown:.2%}")
         return metrics
 
-
-# ─── Backtrader event-driven runner ───────────────────────────────────────────
 
 def run_backtrader(
     df: pd.DataFrame,
@@ -405,8 +375,6 @@ def run_backtrader(
     equity = pd.Series(strat.equity_history, index=df.index[-len(strat.equity_history):])
     return _compute_metrics(equity, signals[-len(equity):])
 
-
-# ─── Walk-forward helper ──────────────────────────────────────────────────────
 
 def walk_forward_test(
     df: pd.DataFrame,

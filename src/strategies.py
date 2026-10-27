@@ -1,17 +1,9 @@
-"""
-src/strategies.py
-=================
-Strategy classes for generating trading signals.
+"""Signal generators.
 
-Architecture:
-    - BaseStrategy defines the interface: generate_signals(df) -> pd.DataFrame
-    - Each strategy is a pure-ish class (state only in config, never in data).
-    - Signals: +1 = long, -1 = short, 0 = flat/exit.
-
-Included strategies:
-    1. MeanReversionStrategy  – RSI + Bollinger Bands z-score
-    2. MomentumStrategy       – MACD crossover + ATR trend filter
-    3. PairsTradingStrategy   – Cointegration-based spread mean reversion
+``generate_signals`` adds ``Signal`` and ``Position`` (+1 long, -1 short,
+0 flat). Mean reversion uses RSI and Bollinger Bands. Momentum uses a MACD
+cross filtered by ADX. The pairs strategy returns ``Position_A`` and
+``Position_B``. The single-asset backtest does not price that book.
 """
 from __future__ import annotations
 
@@ -28,10 +20,8 @@ from src.indicators import (
 )
 
 
-# ─── Base class ───────────────────────────────────────────────────────────────
-
 class BaseStrategy(ABC):
-    """Abstract base for all trading strategies."""
+    """Strategy interface. Subclasses only store their settings."""
 
     name: str = "base"
 
@@ -48,12 +38,10 @@ class BaseStrategy(ABC):
         return f"{self.__class__.__name__}({self.__dict__})"
 
 
-# ─── 1. Mean Reversion ────────────────────────────────────────────────────────
-
 @dataclass
 class MeanReversionStrategy(BaseStrategy):
     """
-    Mean-Reversion Bot using RSI + Bollinger Band z-score.
+    Mean reversion on RSI and Bollinger Bands.
 
     Entry rules:
         Long  : RSI < rsi_oversold  AND  price < BB_Lower
@@ -121,12 +109,10 @@ class MeanReversionStrategy(BaseStrategy):
         return df.dropna(subset=["RSI", "BB_Middle"])
 
 
-# ─── 2. Momentum ──────────────────────────────────────────────────────────────
-
 @dataclass
 class MomentumStrategy(BaseStrategy):
     """
-    Momentum Bot using MACD crossover filtered by ADX trend strength.
+    MACD cross, taken only when ADX is above ``adx_threshold``.
 
     Entry rules:
         Long  : MACD line crosses above Signal line  AND  ADX > adx_threshold
@@ -186,29 +172,19 @@ class MomentumStrategy(BaseStrategy):
         return df.dropna(subset=["MACD", "ADX"])
 
 
-# ─── 3. Pairs Trading ─────────────────────────────────────────────────────────
-
 @dataclass
 class PairsTradingStrategy(BaseStrategy):
-    """
-    Statistical Arbitrage via cointegration-based pairs trading.
+    """Two-leg spread from a rolling hedge ratio.
 
-    The strategy trades the spread between two correlated assets.
-    Spread = price_A - hedge_ratio * price_B
+    The hedge at bar t is fit on the previous ``lookback`` bars and applied
+    to the current prices. Half-life is estimated on the opening formation
+    window only. It is a diagnostic: there is no cointegration test, and
+    signals are still emitted when the half-life falls outside
+    ``min_half_life`` / ``max_half_life``.
 
-    Entry rules:
-        Long  spread (long A, short B) : SpreadZScore < -entry_z
-        Short spread (short A, long B) : SpreadZScore >  entry_z
-
-    Exit rules:
-        Spread mean-reverts: |SpreadZScore| < exit_z
-
-    Args:
-        entry_z:         Z-score threshold to enter.
-        exit_z:          Z-score threshold to exit.
-        lookback:        Rolling window for the hedge-ratio regression.
-        min_half_life:   Minimum half-life (bars) for the formation check.
-        max_half_life:   Maximum half-life (bars) to accept as tradeable.
+    Long the spread (long A, short B) when the z-score is below ``-entry_z``.
+    Short the spread when it is above ``entry_z``. Flat when the absolute
+    z-score is below ``exit_z``.
     """
     name: str = "pairs_trading"
     entry_z: float = 2.0
@@ -298,8 +274,6 @@ class PairsTradingStrategy(BaseStrategy):
         return float(-np.log(2) / slope)
 
 
-# ─── Signal utilities ─────────────────────────────────────────────────────────
-
 def _carry_signal(signal: pd.Series) -> pd.Series:
     """Carry a non-zero signal forward until the opposite signal fires."""
     position = signal.copy()
@@ -323,8 +297,6 @@ def _carry_signal_with_exit(
                 position.iloc[i] = position.iloc[i - 1]
     return position
 
-
-# ─── Strategy factory ─────────────────────────────────────────────────────────
 
 _REGISTRY: dict[str, type[BaseStrategy]] = {
     "mean_reversion": MeanReversionStrategy,

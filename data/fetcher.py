@@ -1,12 +1,10 @@
-"""
-data/fetcher.py
-===============
-Download, cache, and preprocess OHLCV market data from multiple sources.
+"""OHLCV download and a short clean-up.
 
-Sources supported:
-    - yfinance (stocks, ETFs, crypto)
-    - Alpaca (stocks, paper/live)
-    - CCXT (crypto exchanges)
+Yahoo Finance results are cached under ``data/cache`` when pyarrow or
+fastparquet is installed. Alpaca needs
+``ALPACA_API_KEY`` and ``ALPACA_SECRET_KEY``. CCXT public candles work
+without keys; the two CCXT environment variables are attached only when
+both are set.
 """
 from __future__ import annotations
 
@@ -22,7 +20,6 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-# ─── Constants ────────────────────────────────────────────────────────────────
 CACHE_DIR = Path("data/cache")
 OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
 _PRICE_NAMES = {"open", "high", "low", "close", "adj close", "volume"}
@@ -53,8 +50,6 @@ def _flatten_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ─── Cache helpers ────────────────────────────────────────────────────────────
-
 def _cache_path(ticker: str, start: str, end: str, interval: str) -> Path:
     key = f"{ticker}_{start}_{end}_{interval}"
     hashed = hashlib.md5(key.encode()).hexdigest()[:8]
@@ -62,19 +57,26 @@ def _cache_path(ticker: str, start: str, end: str, interval: str) -> Path:
 
 
 def _load_cache(path: Path) -> Optional[pd.DataFrame]:
-    if path.exists():
-        logger.debug(f"Cache hit: {path}")
-        return pd.read_parquet(path)
-    return None
+    if not path.exists():
+        return None
+    try:
+        frame = pd.read_parquet(path)
+    except ImportError:
+        logger.debug("Parquet cache needs pyarrow or fastparquet.")
+        return None
+    logger.debug(f"Cache hit: {path}")
+    return frame
 
 
 def _save_cache(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path)
+    try:
+        df.to_parquet(path)
+    except ImportError:
+        logger.debug("Parquet cache needs pyarrow or fastparquet.")
+        return
     logger.debug(f"Saved cache: {path}")
 
-
-# ─── Preprocessing ────────────────────────────────────────────────────────────
 
 def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -111,8 +113,6 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.dropna()
 
-
-# ─── yfinance fetcher ─────────────────────────────────────────────────────────
 
 def fetch_yfinance(
     ticker: str,
@@ -180,8 +180,6 @@ def fetch_multiple(
             for t in tickers}
 
 
-# ─── Alpaca fetcher ───────────────────────────────────────────────────────────
-
 def fetch_alpaca(
     ticker: str,
     start: str = "2020-01-01",
@@ -241,8 +239,6 @@ def fetch_alpaca(
     bars.columns = [c.title() for c in bars.columns]
     return preprocess(bars)
 
-
-# ─── CCXT crypto fetcher ──────────────────────────────────────────────────────
 
 def fetch_ccxt(
     symbol: str = "BTC/USDT",

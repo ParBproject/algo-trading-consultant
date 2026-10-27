@@ -1,29 +1,9 @@
-"""
-src/optimizer.py
-================
-Parameter optimization for trading strategies.
+"""Parameter search.
 
-Supported methods:
-    - Grid Search     : Exhaustive search over specified value grid.
-    - Random Search   : Randomly sampled configurations (faster).
-    - Bayesian Search : Hyperopt Tree-Parzen Estimator (most efficient).
-
-Parameter search scores walk-forward test folds on a prefix of the sample.
-The final holdout is scored once, after the choice is made, and is not
-an input to that choice.
-
-Usage::
-
-    opt = StrategyOptimizer(
-        strategy_cls=MeanReversionStrategy,
-        df=price_df,
-        param_space={"lookback": [10, 20, 30], "rsi_period": [10, 14, 21]},
-        metric="sharpe",
-        method="bayesian",
-        n_trials=200,
-    )
-    best_params, results_df = opt.run()
-    print(best_params)
+Grid, random, and Bayesian (hyperopt TPE) search score walk-forward folds
+on a prefix of the sample. The last ``holdout_fraction`` of bars is scored
+once after the choice is made and is not used to pick parameters. Random
+and Bayesian draws use ``seed``.
 """
 from __future__ import annotations
 
@@ -41,15 +21,13 @@ from src.backtester import VectorizedBacktester, PerformanceMetrics
 from src.strategies import BaseStrategy
 
 
-# ─── Optimizer ────────────────────────────────────────────────────────────────
-
 MetricName = Literal["sharpe", "sortino", "calmar", "total_return"]
 
 
 @dataclass
 class StrategyOptimizer:
     """
-    Hyperparameter optimizer for trading strategies.
+    Search strategy constructor arguments.
 
     Args:
         strategy_cls:   Strategy class (not instance).
@@ -66,7 +44,8 @@ class StrategyOptimizer:
         initial_capital:Backtesting starting capital.
         commission:     One-way commission fraction.
         slippage:       One-way slippage fraction.
-        n_jobs:         Parallel jobs for grid/random search (-1 = all CPUs).
+        n_jobs:         Parallel jobs for grid search (-1 = all CPUs).
+                        Random search is serial.
         seed:           Seed for random and Bayesian draws. Grid search does
                         not use it. The same seed repeats the same samples.
     """
@@ -118,7 +97,6 @@ class StrategyOptimizer:
         )
         return best, results
 
-    # ── Evaluation ────────────────────────────────────────────────────────────
 
     def _split_holdout(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Cut a tail the search is not allowed to see."""
@@ -192,7 +170,6 @@ class StrategyOptimizer:
             logger.warning(f"Holdout evaluation failed: {e}")
             return -np.inf
 
-    # ── Grid Search ───────────────────────────────────────────────────────────
 
     def _grid_search(self) -> tuple[dict, pd.DataFrame]:
         keys = list(self.param_space.keys())
@@ -215,7 +192,6 @@ class StrategyOptimizer:
 
         return self._finalise(results)
 
-    # ── Random Search ─────────────────────────────────────────────────────────
 
     def _random_search(self) -> tuple[dict, pd.DataFrame]:
         keys = list(self.param_space.keys())
@@ -232,7 +208,6 @@ class StrategyOptimizer:
 
         return self._finalise(results)
 
-    # ── Bayesian (hyperopt) ───────────────────────────────────────────────────
 
     def _bayesian_search(self) -> tuple[dict, pd.DataFrame]:
         try:
@@ -269,7 +244,6 @@ class StrategyOptimizer:
 
         return self._finalise(results)
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _finalise(self, results: list[dict]) -> tuple[dict, pd.DataFrame]:
         df = pd.DataFrame(results).sort_values(self.metric, ascending=False)

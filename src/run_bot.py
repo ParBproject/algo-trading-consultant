@@ -1,14 +1,12 @@
-"""
-src/run_bot.py
-==============
-CLI entry point for running strategies end-to-end.
-
-Usage::
+"""Run a backtest or a paper bar loop from the command line.
 
     python src/run_bot.py --strategy mean_reversion --ticker AAPL
     python src/run_bot.py --strategy momentum --ticker BTC-USD --start 2021-01-01
-    python src/run_bot.py --strategy mean_reversion --ticker MSFT --live --broker paper
     python src/run_bot.py --config config/example.yaml
+
+``--live`` walks bars through the broker. The default broker is the
+in-memory paper broker. A live Alpaca or CCXT endpoint also needs
+``--allow-live``.
 """
 from __future__ import annotations
 
@@ -35,11 +33,9 @@ from src.utils import (
 )
 
 
-# ─── Argument parsing ─────────────────────────────────────────────────────────
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="algo-trading-consultant – run a strategy backtest or paper bot",
+        description="Backtest a strategy, or replay it through a paper broker",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", default=None,
@@ -105,10 +101,8 @@ def apply_config(args: argparse.Namespace, cfg: dict) -> list[str]:
     return ignored
 
 
-# ─── Backtest mode ────────────────────────────────────────────────────────────
-
 def run_backtest(args: argparse.Namespace) -> None:
-    logger.info(f"=== BACKTEST MODE | {args.strategy} on {args.ticker} ===")
+    logger.info(f"Backtest | {args.strategy} on {args.ticker}")
 
     df = fetch_yfinance(args.ticker, args.start, args.end, args.interval)
     strategy = get_strategy(args.strategy, **args.strategy_params)
@@ -150,18 +144,13 @@ def run_backtest(args: argparse.Namespace) -> None:
         )
 
 
-# ─── Paper / Live loop ────────────────────────────────────────────────────────
-
 def run_live(args: argparse.Namespace) -> None:
-    """
-    Bar loop. A signal that uses the close is filled on the next bar.
+    """Walk historical bars. A signal that uses the close is filled on the next bar.
 
-    ``--broker paper`` is the default and does not leave the process.
-    Alpaca and CCXT stay on paper or sandbox endpoints unless
-    ``--allow-live`` is set. Replace the history download with a stream
-    that still waits for the bar to close before reading its signal.
+    ``--broker paper`` does not leave the process. Alpaca and CCXT stay on
+    paper or sandbox endpoints unless ``--allow-live`` is set.
     """
-    logger.info(f"=== LIVE MODE | {args.strategy} on {args.ticker} via {args.broker} ===")
+    logger.info(f"Bar loop | {args.strategy} on {args.ticker} via {args.broker}")
 
     executor = build_executor(args)
     strategy = get_strategy(args.strategy, **args.strategy_params)
@@ -260,8 +249,6 @@ def build_executor(args: argparse.Namespace):
         )
     raise SystemExit(f"Unknown broker '{args.broker}'")
 
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()

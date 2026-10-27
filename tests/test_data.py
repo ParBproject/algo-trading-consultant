@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from data.fetcher import preprocess
+from data.fetcher import _save_cache, preprocess
 
 
 def _ohlcv(index: pd.DatetimeIndex, closes: list[float]) -> list[list[float]]:
@@ -52,3 +52,13 @@ def test_preprocess_keeps_a_flat_frame():
     )
     out = preprocess(raw)
     assert out["Close"].iloc[-1] == pytest.approx(4)
+
+
+def test_save_cache_skips_when_parquet_support_is_missing(tmp_path, monkeypatch):
+    def _missing(*_args, **_kwargs):
+        raise ImportError("no parquet engine")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", _missing)
+    path = tmp_path / "bars.parquet"
+    _save_cache(pd.DataFrame({"Close": [1.0]}), path)
+    assert not path.exists()

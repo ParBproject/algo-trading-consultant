@@ -1,8 +1,4 @@
-"""
-src/utils.py
-============
-Shared utilities: logging setup, config loading, plotting, and PDF reporting.
-"""
+"""Logging, YAML config, charts, and a one-page PDF of backtest stats."""
 from __future__ import annotations
 
 import os
@@ -16,8 +12,6 @@ import pandas as pd
 import yaml
 from loguru import logger
 
-
-# ─── Logging ──────────────────────────────────────────────────────────────────
 
 def setup_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     """Configure loguru to write to console and rotating file."""
@@ -38,8 +32,6 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     )
 
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-
 def load_config(path: str = "config/example.yaml") -> dict[str, Any]:
     """Load YAML config file and expand environment variable references."""
     with open(path) as f:
@@ -51,8 +43,6 @@ def load_config(path: str = "config/example.yaml") -> dict[str, Any]:
 
     return yaml.safe_load(raw)
 
-
-# ─── Plotting ─────────────────────────────────────────────────────────────────
 
 def plot_equity_curve(
     equity: pd.Series,
@@ -124,12 +114,7 @@ def plot_signals(
     figsize: tuple = (14, 6),
     save_path: str | None = None,
 ) -> plt.Figure:
-    """
-    Plot price chart with buy/sell signal markers.
-
-    Green triangles (▲) = long entry.
-    Red triangles (▼)   = short entry / long exit.
-    """
+    """Plot price with markers where ``signal_col`` is +1 or -1."""
     fig, ax = plt.subplots(figsize=figsize)
     ax.plot(df.index, df[price_col], color="#37474F", lw=1.2, label=price_col)
 
@@ -188,8 +173,6 @@ def plot_optimization_heatmap(
     return fig
 
 
-# ─── PDF report generator ─────────────────────────────────────────────────────
-
 def generate_report(
     metrics,
     strategy_name: str,
@@ -197,18 +180,10 @@ def generate_report(
     chart_path: str | None = None,
     output_path: str = "reports/backtest_report.pdf",
 ) -> str:
-    """
-    Generate a client-ready PDF backtest report via ReportLab.
+    """Write a one-page PDF of the backtest statistics.
 
-    Args:
-        metrics:       PerformanceMetrics dataclass instance.
-        strategy_name: Human-readable strategy name.
-        ticker:        Asset traded.
-        chart_path:    Optional path to equity chart image to embed.
-        output_path:   Destination PDF path.
-
-    Returns:
-        Path to generated PDF.
+    ``chart_path``, when set and present on disk, is embedded under the table.
+    Returns the path written.
     """
     try:
         from reportlab.lib.pagesizes import letter
@@ -233,10 +208,8 @@ def generate_report(
         styles["Title"]
     ))
     story.append(Paragraph(
-        "⚠ Educational use only. Past performance does not guarantee future results. "
-        "Trading involves substantial risk of loss.",
-        ParagraphStyle("disclaimer", parent=styles["Normal"],
-                       textColor=colors.red, fontSize=8, spaceAfter=12)
+        "Figures from this backtest. Not a forecast.",
+        ParagraphStyle("note", parent=styles["Normal"], fontSize=8, spaceAfter=12),
     ))
     story.append(Spacer(1, 0.2*inch))
 

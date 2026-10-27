@@ -34,3 +34,13 @@ reports/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local agent tooling and notes
+.cursor/
+.cursorrules
+AGENTS.md
+AGENT.md
+CLAUDE.md
+.claude/
+*.plan.md
+plans/
