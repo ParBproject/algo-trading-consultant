@@ -7,7 +7,6 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import numpy as np
 import pandas as pd
 import yaml
 from loguru import logger
@@ -106,6 +105,23 @@ def plot_equity_curve(
     return fig
 
 
+def _held_position(df: pd.DataFrame, signal_col: str) -> pd.Series:
+    """Position state used to mark exits.
+
+    ``Signal`` is an entry impulse. A zero there is usually a bar with no
+    new order, including bars that are still in a trade. The held state is
+    ``Position``, or ``Position_<leg>`` when ``signal_col`` is ``Signal_<leg>``.
+    Without that column, ``signal_col`` itself is treated as the state.
+    """
+    if signal_col == "Signal" and "Position" in df.columns:
+        return df["Position"]
+    if signal_col.startswith("Signal_"):
+        leg = "Position_" + signal_col.removeprefix("Signal_")
+        if leg in df.columns:
+            return df[leg]
+    return df[signal_col]
+
+
 def plot_signals(
     df: pd.DataFrame,
     price_col: str = "Close",
@@ -114,18 +130,27 @@ def plot_signals(
     figsize: tuple = (14, 6),
     save_path: str | None = None,
 ) -> plt.Figure:
-    """Plot price with markers where ``signal_col`` is +1 or -1."""
+    """Plot price with entry markers and exits back to flat.
+
+    ``signal_col`` of +1 or -1 is an entry. An exit is the bar a held
+    position goes from non-zero to zero, not every bar where the signal is
+    already flat.
+    """
     fig, ax = plt.subplots(figsize=figsize)
     ax.plot(df.index, df[price_col], color="#37474F", lw=1.2, label=price_col)
 
     longs = df[df[signal_col] == 1]
     shorts = df[df[signal_col] == -1]
-    exits = df[df[signal_col] == 0]
+    state = _held_position(df, signal_col)
+    previous = state.shift(1)
+    exits = df.loc[(state == 0) & previous.notna() & (previous != 0)]
 
     ax.scatter(longs.index, longs[price_col], marker="^", color="#4CAF50",
                s=80, zorder=5, label="Long Entry")
     ax.scatter(shorts.index, shorts[price_col], marker="v", color="#F44336",
                s=80, zorder=5, label="Short Entry")
+    ax.scatter(exits.index, exits[price_col], marker="x", color="#FF9800",
+               s=80, zorder=5, label="Exit")
 
     ax.set_title(title, fontsize=14, fontweight="bold")
     ax.set_ylabel("Price ($)")

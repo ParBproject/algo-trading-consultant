@@ -12,7 +12,7 @@ import os
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 import inspect
 

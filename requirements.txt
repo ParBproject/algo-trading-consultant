@@ -1,31 +1,26 @@
-# Pinned versions are the ones the test suite was run against.
-# They install on Python 3.11 (CI) and 3.12.
-# Broker, notebook, and optional research packages below stay ranged:
-# CI does not install them, and pinning an untested release can break a local env.
+# Exact pins for the packages this repo imports. The test suite was run
+# against these versions on Python 3.11 (CI) and 3.12.
+#
+# pandas-ta is not listed. 0.4.71b0 (current) requires numba==0.61.2, and
+# that numba requires numpy<2.3, so a loose pin downgrades numpy==2.4.4.
+# Indicators in src/indicators.py do not import pandas-ta.
+#
+# vectorbt is optional and is not imported by the backtest. A loose
+# vectorbt>=0.26.1 currently resolves to 1.x and upgrades numpy. The
+# release that keeps these pins is vectorbt==0.28.2, in
+# requirements-extras.txt, with plotly==6.5.2 (plotly 7 breaks its import).
 
 # Core
 numpy==2.4.4
 pandas==3.0.6
 scipy==1.17.1
 
-# Indicators
-pandas-ta>=0.3.14b
-
 # Data
-yfinance>=0.2.28
-
-# Broker APIs
-alpaca-py>=0.10.0
-ccxt>=4.1.0
-
-# Backtesting
-backtrader>=1.9.78.123
-vectorbt>=0.26.1
+yfinance==1.7.0
 
 # Visualization
 matplotlib==3.11.2
-seaborn>=0.12.0
-plotly>=5.15.0
+seaborn==0.13.2
 
 # Optimization
 hyperopt==0.3.0
@@ -35,11 +30,7 @@ scikit-learn==1.9.1
 loguru==0.7.3
 PyYAML==6.0.1
 joblib==1.6.0
-reportlab>=4.0.0
-
-# Notebook support
-jupyterlab>=4.0.0
-ipywidgets>=8.0.0
+reportlab==4.4.10
 
 # Tests
 pytest==9.1.1
