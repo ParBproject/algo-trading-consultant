@@ -16,13 +16,17 @@ The paper broker is the default. Alpaca and CCXT stay on paper or sandbox endpoi
 
 ## Run
 
-Requires Python 3.11 (CI) or 3.12. The scientific packages, hyperopt, matplotlib, and pytest are pinned in `requirements.txt`. Broker and notebook packages are not, and CI does not install them.
+Requires Python 3.11 (CI) or 3.12. `requirements.txt` pins every package the library and the tests import. Broker clients, Jupyter, backtrader, plotly, and vectorbt are pinned in `requirements-extras.txt` to releases that keep numpy and pandas where they are. CI installs only `requirements.txt`. pandas-ta is not installed: the current release pins a numba that requires numpy older than 2.3, and `src/indicators.py` does not import it.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pytest
+```
+
+```bash
+pip install -r requirements-extras.txt
 ```
 
 Copy `.env.example` if you point a fetcher at Alpaca or CCXT. Leave the keys empty for the paper broker. `config/example.yaml` has no secrets and defaults to `broker: paper`.

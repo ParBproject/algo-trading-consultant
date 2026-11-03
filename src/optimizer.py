@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 import random
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd

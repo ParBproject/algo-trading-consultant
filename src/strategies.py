@@ -8,7 +8,7 @@ cross filtered by ADX. The pairs strategy returns ``Position_A`` and
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -16,7 +16,7 @@ import pandas as pd
 from loguru import logger
 
 from src.indicators import (
-    atr, bollinger_bands, macd, rsi, sma, spread_zscore, zscore, adx
+    atr, bollinger_bands, macd, rsi, spread_zscore, zscore, adx
 )
 
 

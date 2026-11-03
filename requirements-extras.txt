@@ -1,0 +1,24 @@
+# Optional packages that install on top of requirements.txt without
+# changing the pinned numpy or pandas:
+#   pip install -r requirements-extras.txt
+#
+# CI does not install this file. pandas-ta is omitted; see requirements.txt.
+
+-r requirements.txt
+
+# Brokers
+alpaca-py==0.44.0
+ccxt==4.5.91
+
+# Optional event-driven engine (src.backtester.run_backtrader)
+backtrader==1.9.78.123
+
+# Research chart stack. vectorbt 0.28.2 keeps numpy==2.4.4 and pandas==3.0.6.
+# plotly 7 rejects the scattermapbox key in that vectorbt theme, so plotly
+# stays on 6.5.2.
+vectorbt==0.28.2
+plotly==6.5.2
+
+# Notebooks
+jupyterlab==4.6.5
+ipywidgets==8.1.9
